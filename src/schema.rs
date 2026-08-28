@@ -16,6 +16,9 @@
 
 use crate::grammar::is_type_name;
 use crate::value::{Map, Node, Scalar, Shape};
+#[cfg(not(any(test, feature = "serde")))]
+#[allow(unused_imports)]
+// format! resolves to this under no_std; clippy misfires on macro imports
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;

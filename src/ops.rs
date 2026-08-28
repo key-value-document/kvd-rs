@@ -21,6 +21,9 @@
 //! Document merging is intentionally out of scope for this module (see
 //! spec §8.5).
 
+#[cfg(not(any(test, feature = "serde")))]
+#[allow(unused_imports)]
+// format! resolves to this under no_std; clippy misfires on macro imports
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;

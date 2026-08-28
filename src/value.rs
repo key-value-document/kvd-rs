@@ -5,6 +5,9 @@
 //! fidelity (original token, block mode) for the emitter to normalize
 //! spelling without losing information.
 
+#[cfg(not(any(test, feature = "serde")))]
+#[allow(unused_imports)]
+// format! resolves to this under no_std; clippy misfires on macro imports
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
