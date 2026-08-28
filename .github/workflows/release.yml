@@ -1,0 +1,20 @@
+# Publish kvd-rs to crates.io on tagged releases.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    container:
+      image: rust:1-trixie
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Publish kvd-rs
+        run: cargo publish -p kvd-rs --token ${{ secrets.CARGO_REGISTRY_TOKEN }}

@@ -1,0 +1,13 @@
+app:
+  name: "hello"
+  port: 8080
+  version: "1.5.2"
+  endpoints:
+    - path: "/health"
+      method: "GET"
+  hooks:
+    - """
+      #!/bin/sh
+      echo hi
+      """
+  retries: null

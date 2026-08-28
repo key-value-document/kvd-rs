@@ -1,0 +1,12 @@
+app:
+  name: str
+  port: int
+  version: str
+  endpoints:
+    - path: str
+      method: str
+  hooks:
+    - str
+  retries:
+    type: int
+    optional: true

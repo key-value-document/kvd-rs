@@ -1,0 +1,105 @@
+# CI for kvd-rs — the KVD core library.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "examples/**"
+      - "fuzz/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/**"
+  pull_request:
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "examples/**"
+      - "fuzz/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/**"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: rust:1-trixie
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install rustfmt and clippy
+        run: rustup component add rustfmt clippy
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Test
+        run: cargo test
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Release build
+        run: cargo build --release
+
+      - name: Package crate
+        run: cargo package -p kvd-rs
+
+      - name: Upload crate artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: kvd-rs
+          path: target/package/*.crate
+          if-no-files-found: error
+          retention-days: 14
+
+  fuzz:
+    runs-on: ubuntu-latest
+    container:
+      image: rust:1-trixie
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Cache cargo-fuzz toolchain and binary
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/bin/cargo-fuzz
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-fuzz-v1
+
+      - name: Install nightly, llvm-tools and cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup component add llvm-tools-preview --toolchain nightly
+          command -v cargo-fuzz >/dev/null || cargo install cargo-fuzz --locked
+
+      - name: Build all fuzz targets
+        run: cargo +nightly fuzz build
+
+      - name: Fuzz parser (no panics / determinism)
+        run: cargo +nightly fuzz run parse -- -max_total_time=180 -max_len=8192
+
+      - name: Fuzz serializer round-trip (idempotence)
+        run: cargo +nightly fuzz run roundtrip -- -max_total_time=180 -max_len=8192
+
+      - name: Fuzz schema verification (no panics)
+        run: cargo +nightly fuzz run verify -- -max_total_time=180 -max_len=8192

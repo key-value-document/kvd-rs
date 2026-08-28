@@ -1,0 +1,21 @@
+[package]
+name = "kvd-rs"
+description = "KVD — Key-Value Document format: value model, error model, and serializer"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/key-value-document/kvd-rs"
+keywords = ["config", "data-format", "serialization", "key-value"]
+categories = ["config", "data-structures", "parser-implementations"]
+exclude = [".github/**", ".gitignore"]
+
+[dependencies]
+serde = { version = "1", optional = true }
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[features]
+serde = ["dep:serde"]
