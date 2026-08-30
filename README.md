@@ -1,9 +1,6 @@
 # KVD — Key-Value Document format
 
-KVD is a line-oriented config/data format that keeps YAML's readability
-without its pitfalls: strict 2-space indentation, no flow collections, no
-implicit coercion, no anchors or aliases, and exactly one way to spell most
-things.
+KVD is an opinionated human-readable config/data format.
 
 ## Quickstart
 
