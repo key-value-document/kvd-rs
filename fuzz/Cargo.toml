@@ -2,7 +2,7 @@
 name = "kvd-rs-fuzz"
 version = "1.0.0"
 publish = false
-edition = "2021"
+edition = "2024"
 
 [package.metadata]
 cargo-fuzz = true
@@ -10,7 +10,7 @@ cargo-fuzz = true
 [workspace]
 
 [dependencies]
-libfuzzer-sys = "0.4"
+libfuzzer-sys = "0.4.0"
 kvd-rs = { path = ".." }
 
 [[bin]]

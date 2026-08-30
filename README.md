@@ -14,8 +14,8 @@ and let serde do the traversal. Enable the `serde` feature:
 
 ```toml
 [dependencies]
-kvd-rs = { version = "1.0", features = ["serde"] }
-serde = { version = "1", features = ["derive"] }
+kvd-rs = { version = "1.0.0", features = ["serde"] }
+serde = { version = "1.0.0", features = ["derive"] }
 ```
 
 ```rust
@@ -159,8 +159,8 @@ directly — no manual `Node` traversal:
 
 ```toml
 [dependencies]
-kvd-rs = { version = "1.0", features = ["serde"] }
-serde = { version = "1", features = ["derive"] }
+kvd-rs = { version = "1.0.0", features = ["serde"] }
+serde = { version = "1.0.0", features = ["derive"] }
 ```
 
 ```rust
@@ -188,4 +188,4 @@ Spec 1.0 — see [docs/README.md](docs/README.md) (index) and
 
 ## License
 
-MIT OR Apache-2.0
+MIT
