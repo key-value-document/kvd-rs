@@ -274,37 +274,49 @@ fn emit_triple(
     writeln!(out, "\"\"\"")?;
     let pad = " ".repeat(content_col + 2);
     let closer_pad = " ".repeat(closer_col);
+    let escape_line = |line: &str| -> String {
+        if line.is_empty() {
+            return String::new();
+        }
+        let leading = line.len() - line.trim_start_matches(' ').len();
+        let rest = &line[leading..];
+        let escaped_rest = rest.replace('\\', "\\\\");
+        if leading == 0 {
+            escaped_rest
+        } else {
+            let mut s = String::with_capacity(leading * 6 + escaped_rest.len());
+            for _ in 0..leading {
+                s.push_str("\\u0020");
+            }
+            s.push_str(&escaped_rest);
+            s
+        }
+    };
     if let Some(body) = text.strip_suffix('\n') {
-        // Standalone closer: emit content lines, then `"""` on its own line.
         for line in body.split('\n') {
             if line.is_empty() {
                 writeln!(out)?;
             } else {
-                let escaped = line.replace('\\', "\\\\");
+                let escaped = escape_line(line);
                 writeln!(out, "{}{}", pad, escaped)?;
             }
         }
         write!(out, "{}\"\"\"", closer_pad)?;
     } else {
-        // Inline closer: `"""` appended to the last content line.
         let mut lines = text.split('\n').peekable();
         while let Some(line) = lines.next() {
             if lines.peek().is_some() {
-                // Not the last line: emit normally.
                 if line.is_empty() {
                     writeln!(out)?;
                 } else {
-                    let escaped = line.replace('\\', "\\\\");
+                    let escaped = escape_line(line);
                     writeln!(out, "{}{}", pad, escaped)?;
                 }
+            } else if line.is_empty() {
+                write!(out, "{}\"\"\"", closer_pad)?;
             } else {
-                // Last line: append `"""` inline (no newline; caller adds it).
-                if line.is_empty() {
-                    write!(out, "{}\"\"\"", closer_pad)?;
-                } else {
-                    let escaped = line.replace('\\', "\\\\");
-                    write!(out, "{}{}\"\"\"", pad, escaped)?;
-                }
+                let escaped = escape_line(line);
+                write!(out, "{}{}\"\"\"", pad, escaped)?;
             }
         }
     }
