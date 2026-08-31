@@ -6,13 +6,13 @@
 //! YAML-style coercion. Underscore separators (`1_000`) are accepted
 //! wherever the grammar allows them.
 
-use crate::serde::error::{float_text, SerdeError};
+use crate::serde::error::{SerdeError, float_text};
 use crate::value::{Map, Node, Scalar, Shape};
+use serde::Deserialize;
 use serde::de::{
     self, DeserializeSeed, Deserializer, EnumAccess, IntoDeserializer, MapAccess, SeqAccess,
     VariantAccess, Visitor,
 };
-use serde::Deserialize;
 use std::fmt;
 use std::str::FromStr;
 

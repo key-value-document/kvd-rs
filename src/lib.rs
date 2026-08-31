@@ -29,7 +29,7 @@
 //! assert_eq!(app.retries, None);
 //!
 //! let canonical = kvd_rs::to_string(&app)?;
-//! assert_eq!(canonical, "name: \"hello\"\nport: 8080\nretries: null\n");
+//! assert_eq!(canonical, "name: \"hello\"\nport: 8_080\nretries: null\n");
 //!
 //! // Reader/writer/file variants exist too:
 //! let app2: App = kvd_rs::from_reader(std::io::Cursor::new(canonical.as_bytes()))?;

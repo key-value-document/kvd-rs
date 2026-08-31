@@ -66,10 +66,30 @@ pub struct Scalar {
 }
 
 /// Semantic equality: spelling (`raw`) is deliberately ignored, so a value
-/// written `"cluster.local"` equals the same value written bare.
+/// written `"cluster.local"` equals the same value written bare. For
+/// integers, underscore separators are ignored so `1_000 == 1000`.
 impl PartialEq for Scalar {
     fn eq(&self, other: &Self) -> bool {
-        self.shape == other.shape && self.text == other.text
+        if self.shape != other.shape {
+            return false;
+        }
+        if self.shape == Shape::Int {
+            return int_text_eq(&self.text, &other.text);
+        }
+        self.text == other.text
+    }
+}
+
+/// Integer text equality ignoring `_` separators (e.g. `1_000 == 1000`).
+fn int_text_eq(a: &str, b: &str) -> bool {
+    let mut ia = a.chars().filter(|c| *c != '_');
+    let mut ib = b.chars().filter(|c| *c != '_');
+    loop {
+        match (ia.next(), ib.next()) {
+            (None, None) => return true,
+            (Some(x), Some(y)) if x == y => continue,
+            _ => return false,
+        }
     }
 }
 
@@ -447,7 +467,7 @@ impl Node {
                             0,
                             0,
                             format!("{here}: key not found"),
-                        ))
+                        ));
                     }
                 };
                 child.get_path_mut_inner(path, &here)

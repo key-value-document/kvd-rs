@@ -2,7 +2,7 @@
 //!
 //! Run with: cargo run -p kvd-rs --example schema_verify
 
-use kvd_rs::schema::{verify_from_str, VerifyError};
+use kvd_rs::schema::{VerifyError, verify_from_str};
 
 fn main() {
     // 1. Standalone schema document (bare tree, builtin types only).

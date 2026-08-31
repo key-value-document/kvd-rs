@@ -119,7 +119,7 @@ impl Path {
                 let close = match s[i..].find(']') {
                     Some(c) => c,
                     None => {
-                        return Err(OpError::BadPath(format!("unterminated `[` in path `{s}`")))
+                        return Err(OpError::BadPath(format!("unterminated `[` in path `{s}`")));
                     }
                 };
                 let num = &s[i + 1..i + close];
@@ -131,7 +131,7 @@ impl Path {
                     Err(_) => {
                         return Err(OpError::BadPath(format!(
                             "invalid list index `{num}` in path `{s}`"
-                        )))
+                        )));
                     }
                 };
                 segments.push(Segment::Index(idx));
@@ -600,15 +600,19 @@ mod tests {
         assert_eq!(removed.unwrap().as_scalar().unwrap().text, "x");
         assert!(get(&d, &Path::parse("a.b").unwrap()).is_none());
         // ancestor `a` is left as an empty map, not pruned
-        assert!(get(&d, &Path::parse("a").unwrap())
-            .unwrap()
-            .as_map()
-            .is_some());
-        assert!(get(&d, &Path::parse("a").unwrap())
-            .unwrap()
-            .as_map()
-            .unwrap()
-            .is_empty());
+        assert!(
+            get(&d, &Path::parse("a").unwrap())
+                .unwrap()
+                .as_map()
+                .is_some()
+        );
+        assert!(
+            get(&d, &Path::parse("a").unwrap())
+                .unwrap()
+                .as_map()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

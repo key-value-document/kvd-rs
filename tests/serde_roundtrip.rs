@@ -20,7 +20,7 @@ struct App {
     ratio: f64,
 }
 
-const TEXT: &str = "app:\n  port: 8080\n  host: \"cluster.local\"\n  debug: true\n  ratio: 0.75\n";
+const TEXT: &str = "app:\n  port: 8_080\n  host: \"cluster.local\"\n  debug: true\n  ratio: 0.75\n";
 
 #[test]
 fn readme_example() {

@@ -6,7 +6,7 @@
 //! order — use structs (field order), `BTreeMap`, or `IndexMap` when
 //! deterministic output matters.
 
-use crate::serde::error::{float_text, SerdeError};
+use crate::serde::error::{SerdeError, float_text};
 use crate::value::{Map, Node, Shape};
 use serde::ser::{self, SerializeMap as _, SerializeSeq as _};
 use serde::{Serialize, Serializer};
@@ -318,7 +318,7 @@ impl ser::SerializeMap for MapSer {
             other => {
                 return Err(SerdeError::new(format!(
                     "map keys must be strings, got {other:?}"
-                )))
+                )));
             }
         });
         Ok(())
