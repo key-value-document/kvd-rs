@@ -280,7 +280,8 @@ fn emit_triple(
             if line.is_empty() {
                 writeln!(out)?;
             } else {
-                writeln!(out, "{}{}", pad, line)?;
+                let escaped = line.replace('\\', "\\\\");
+                writeln!(out, "{}{}", pad, escaped)?;
             }
         }
         write!(out, "{}\"\"\"", closer_pad)?;
@@ -293,14 +294,16 @@ fn emit_triple(
                 if line.is_empty() {
                     writeln!(out)?;
                 } else {
-                    writeln!(out, "{}{}", pad, line)?;
+                    let escaped = line.replace('\\', "\\\\");
+                    writeln!(out, "{}{}", pad, escaped)?;
                 }
             } else {
                 // Last line: append `"""` inline (no newline; caller adds it).
                 if line.is_empty() {
                     write!(out, "{}\"\"\"", closer_pad)?;
                 } else {
-                    write!(out, "{}{}\"\"\"", pad, line)?;
+                    let escaped = line.replace('\\', "\\\\");
+                    write!(out, "{}{}\"\"\"", pad, escaped)?;
                 }
             }
         }
