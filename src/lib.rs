@@ -39,10 +39,6 @@
 //! # }
 //! ```
 
-// The `serde` feature pulls in `std`-only APIs (`std::io`/`std::fs`, file
-// round-tripping, and `std::error::Error` for `SerdeError`), so the crate
-// must use `std` whenever that feature is enabled.
-#![cfg_attr(not(any(test, feature = "serde")), no_std)]
 #![warn(missing_docs)]
 
 extern crate alloc;

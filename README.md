@@ -21,7 +21,7 @@ kvd-rs = { version = "1.0.0", features = ["serde"] }
 serde = { version = "1.0.0", features = ["derive"] }
 ```
 
-Without `serde` the crate has zero dependencies and exposes only the `Node` API.
+Without `serde` the crate has a single dependency (`regex`) for `§10` validation and exposes the `Node` API; the crate is `std` (validation requires `std`).
 
 ## Usage
 

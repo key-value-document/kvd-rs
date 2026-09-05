@@ -1,4 +1,4 @@
-//! Schema verification (spec §5): a separate pass over a parsed document.
+//! Schema verification (spec §5, §10): a separate pass over a parsed document.
 //!
 //! The parser is registry-free; this module checks a data [`Node`] against
 //! a schema. A standalone schema document is ordinary KVD whose values are
@@ -7,22 +7,36 @@
 //! literals — a bare tree mirroring the data's structure, with no
 //! metakeys (`__schema__` belongs in data documents only, spec §4). A
 //! one-item list declares the element type for every item of the
-//! corresponding data list.
-//!
-//! v1 rules: every data key must appear in the schema and vice versa
-//! (all keys required), dotted keys and nested blocks are interchangeable
-//! (the parser already normalizes both to nested maps), and a `{}` leaf
-//! accepts any map while a `[]` leaf accepts any list — contents unchecked.
+//! corresponding data list. Descriptors may carry `optional: true` and a
+//! `validation` block with ranges, lengths, and patterns (spec §10).
 
 use crate::grammar::is_type_name;
 use crate::value::{Map, Node, Scalar, Shape};
-#[cfg(not(any(test, feature = "serde")))]
-#[allow(unused_imports)]
-// format! resolves to this under no_std; clippy misfires on macro imports
-use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
+/// Global cache for compiled regexes: anchored pattern → Regex.
+/// Avoids recompiling the same `pattern` on every value check.
+static REGEX_CACHE: OnceLock<Mutex<HashMap<String, regex::Regex>>> = OnceLock::new();
+
+fn regex_for_pattern(pattern: &str) -> Result<regex::Regex, regex::Error> {
+    let anchored = format!("^(?:{pattern})$");
+    let cache = REGEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    // Fast path: cloned hit
+    {
+        let map = cache.lock().unwrap();
+        if let Some(re) = map.get(&anchored) {
+            return Ok(re.clone());
+        }
+    }
+    let re = regex::Regex::new(&anchored)?;
+    let mut map = cache.lock().unwrap();
+    map.insert(anchored, re.clone());
+    Ok(re)
+}
 
 /// One verification failure, located by the dotted path of the offending
 /// value (`app.port`, `endpoints[0].method`, `__schema__.pem`).
@@ -162,7 +176,7 @@ pub fn verify_from_str(doc: &str, schema: &str) -> Result<(), VerifyError> {
     verify(&d, &s)
 }
 
-/// Collects structural problems in a schema tree (spec §5). A well-formed
+/// Collects structural problems in a schema tree (spec §5, §10). A well-formed
 /// schema is a bare tree whose leaves are builtin type names, `{}`/`[]`
 /// literals, or descriptor maps carrying a `type`. Problems found here are
 /// surfaced as [`VerifyError::SchemaMalformed`], separate from document
@@ -189,18 +203,7 @@ fn validate_schema(schema: &Node, path: &str, out: &mut Vec<Violation>) {
             }
             if let Some((name, _)) = descriptor(schema) {
                 // Descriptor leaf.
-                if name == "list" {
-                    match m.get("element") {
-                        None => {
-                            out.push(Violation::new(path, "type: list requires an `element` key"))
-                        }
-                        Some(e) => validate_schema(e, &join(path, "element"), out),
-                    }
-                } else if name == "map" {
-                    // `type: map` takes no further structure.
-                } else if builtin(&name).is_none() {
-                    out.push(Violation::new(path, format!("unknown type `{name}`")));
-                }
+                validate_descriptor_schema(m, &name, path, out);
                 return;
             }
             if m.get("optional").is_some() || m.get("validation").is_some() {
@@ -228,6 +231,187 @@ fn validate_schema(schema: &Node, path: &str, out: &mut Vec<Violation>) {
             validate_schema(&items[0], &format!("{path}[0]"), out);
         }
     }
+}
+
+/// Validates a descriptor map's internal structure (spec §10).
+fn validate_descriptor_schema(m: &Map, type_name: &str, path: &str, out: &mut Vec<Violation>) {
+    // Unknown type already handled for scalar? For descriptor we check again.
+    if builtin(type_name).is_none() {
+        out.push(Violation::new(path, format!("unknown type `{type_name}`")));
+        return;
+    }
+    // Check for unexpected keys at descriptor level.
+    let allowed_descriptor_keys: &[&str] = if type_name == "list" {
+        &["type", "optional", "validation", "element"]
+    } else {
+        &["type", "optional", "validation"]
+    };
+    for (k, _) in m.iter() {
+        if !allowed_descriptor_keys.contains(&k) {
+            out.push(Violation::new(
+                join(path, k),
+                format!("unknown key `{k}` in descriptor (expected one of {})", allowed_descriptor_keys.join(", ")),
+            ));
+        }
+    }
+    // Validate `optional` is a bool if present.
+    if let Some(opt) = m.get("optional") {
+        match opt.as_scalar() {
+            Some(s) if s.shape == Shape::Bool => {}
+            _ => out.push(Violation::new(
+                join(path, "optional"),
+                "`optional` must be `true` or `false`",
+            )),
+        }
+    }
+    // Validate `element` for list, ensure present and recursively valid.
+    if type_name == "list" {
+        match m.get("element") {
+            None => {
+                out.push(Violation::new(path, "type: list requires an `element` key"));
+            }
+            Some(e) => validate_schema(e, &join(path, "element"), out),
+        }
+    } else if m.get("element").is_some() {
+        // `element` only for list
+        out.push(Violation::new(
+            join(path, "element"),
+            "`element` is only valid for `type: list`",
+        ));
+    }
+
+    // Validate `validation` block if present.
+    if let Some(vnode) = m.get("validation") {
+        match vnode.as_map() {
+            Some(vmap) => {
+                validate_validation_block(vmap, type_name, &join(path, "validation"), out);
+            }
+            None => {
+                out.push(Violation::new(
+                    join(path, "validation"),
+                    "`validation` must be a map",
+                ));
+            }
+        }
+    }
+}
+
+/// Validates the contents of a `validation` map for a given builtin type (spec §10).
+fn validate_validation_block(vmap: &Map, type_name: &str, path: &str, out: &mut Vec<Violation>) {
+    let builtin = builtin(type_name).unwrap();
+    let allowed: &[&str] = match builtin {
+        Builtin::Int | Builtin::Float => &["min", "max", "exclusive_min", "exclusive_max"],
+        Builtin::Str => &["min_len", "max_len", "pattern"],
+        Builtin::List | Builtin::Map => &["min_len", "max_len"],
+        Builtin::Bool => &[],
+    };
+    for (k, v) in vmap.iter() {
+        if !allowed.contains(&k) {
+            out.push(Violation::new(
+                join(path, k),
+                format!("unknown constraint `{k}` for type `{type_name}`"),
+            ));
+            continue;
+        }
+        // Validate value shape per constraint.
+        match k {
+            "min" | "max" | "exclusive_min" | "exclusive_max" => {
+                // Must be numeric scalar.
+                match v.as_scalar() {
+                    Some(s) if s.shape == Shape::Int || s.shape == Shape::Float => {
+                        // For int type we expect int, for float we allow int or float.
+                        // Enforce: int type requires int shape, float allows either.
+                        if builtin == Builtin::Int && s.shape != Shape::Int {
+                            out.push(Violation::new(
+                                join(path, k),
+                                format!("constraint `{k}` for `int` must be an int"),
+                            ));
+                        } else if builtin == Builtin::Float && s.shape != Shape::Int && s.shape != Shape::Float {
+                            out.push(Violation::new(
+                                join(path, k),
+                                format!("constraint `{k}` for `float` must be a number"),
+                            ));
+                        }
+                        // Also check that numeric text parses. Floats forbid '_' (spec §2).
+                        // For float, ensure it can parse as f64 without stripping.
+                        if s.shape == Shape::Float {
+                            if s.text.parse::<f64>().is_err() {
+                                out.push(Violation::new(
+                                    join(path, k),
+                                    format!("invalid float value `{}` for constraint `{k}`", s.text),
+                                ));
+                            }
+                        } else if s.shape == Shape::Int {
+                            // Check int parses (allow underscores)
+                            let clean = s.text.replace('_', "");
+                            // Try to validate int grammar roughly; if it fails, report malformed.
+                            if !crate::grammar::is_int(&clean) && !crate::grammar::is_int(&s.text) {
+                                // Fallback: try to parse; if not int-like, still consider malformed.
+                                // Use helper: try to see if it looks like int; if not, error.
+                                // For now, if not parseable as i128, flag.
+                                let tight = s.text.replace('_', "");
+                                if tight.parse::<i128>().is_err() && !is_big_int(&tight) {
+                                    out.push(Violation::new(
+                                        join(path, k),
+                                        format!("invalid int value `{}` for constraint `{k}`", s.text),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    _ => out.push(Violation::new(
+                        join(path, k),
+                        format!("constraint `{k}` must be a number"),
+                    )),
+                }
+            }
+            "min_len" | "max_len" => {
+                match v.as_scalar() {
+                    Some(s) if s.shape == Shape::Int => {
+                        let clean = s.text.replace('_', "");
+                        match clean.parse::<i64>() {
+                            Ok(n) if n >= 0 => {}
+                            Ok(_) => out.push(Violation::new(
+                                join(path, k),
+                                format!("constraint `{k}` must be a non-negative int"),
+                            )),
+                            Err(_) => out.push(Violation::new(
+                                join(path, k),
+                                format!("constraint `{k}` must be a non-negative int"),
+                            )),
+                        }
+                    }
+                    _ => out.push(Violation::new(
+                        join(path, k),
+                        format!("constraint `{k}` must be a non-negative int"),
+                    )),
+                }
+            }
+            "pattern" => {
+                match v.as_scalar() {
+                    Some(s) if s.shape == Shape::Str => {
+                        // Full-match: wrapping in ^(?:...)$.
+                        if regex_for_pattern(&s.text).is_err() {
+                            out.push(Violation::new(
+                                join(path, k),
+                                format!("invalid pattern regex `{}`", s.text),
+                            ));
+                        }
+                    }
+                    _ => out.push(Violation::new(
+                        join(path, k),
+                        "constraint `pattern` must be a string",
+                    )),
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+fn is_big_int(s: &str) -> bool {
+    let t = s.trim_start_matches(['+', '-']);
+    !t.is_empty() && t.chars().all(|c| c.is_ascii_digit())
 }
 
 /// Verifies `doc` against its own embedded schema — the `__schema__` entry at
@@ -328,16 +512,17 @@ fn descriptor(schema: &Node) -> Option<(String, bool)> {
     }
 }
 
-/// Validates `data` against a schema leaf descriptor (spec §5).
+/// Validates `data` against a schema leaf descriptor (spec §5, §10).
 ///
 /// A descriptor is a map carrying a `type` key. Container types `list` and
 /// `map` may carry `optional` and are dispatched to [`check_list`] /
-/// [`check_map`]; scalar types defer to [`check_shape`].
+/// [`check_map`]; scalar types defer to [`check_shape`] followed by constraint
+/// checks.
 fn check_descriptor(schema: &Node, data: &Node, path: &str, out: &mut Vec<Violation>) {
     let Some((name, optional)) = descriptor(schema) else {
         return;
     };
-    // `null` is valid only under an optional type (spec §5).
+    // `null` is valid only under an optional type (spec §5). Constraints skipped.
     if matches!(data.as_scalar(), Some(sc) if sc.shape == Shape::Null) {
         if !optional {
             out.push(Violation::new(
@@ -351,7 +536,14 @@ fn check_descriptor(schema: &Node, data: &Node, path: &str, out: &mut Vec<Violat
         "list" => check_list(schema, data, path, out),
         "map" => check_map(schema, data, path, out),
         _ => match builtin(&name) {
-            Some(base) => check_shape(base, data, path, out),
+            Some(base) => {
+                let before = out.len();
+                check_shape(base, data, path, out);
+                // Only apply constraints if shape matched (no new violations).
+                if out.len() == before {
+                    check_validation_for_scalar(schema, data, base, path, out);
+                }
+            }
             None => out.push(Violation::new(path, format!("unknown type `{name}`"))),
         },
     }
@@ -359,7 +551,7 @@ fn check_descriptor(schema: &Node, data: &Node, path: &str, out: &mut Vec<Violat
 
 /// Verifies a `type: list` descriptor: `data` is a list whose every item
 /// matches the required `element` type (spec §5). The `element` type is
-/// uniform across all items.
+/// uniform across all items. Also enforces `validation: {min_len,max_len}`.
 fn check_list(schema: &Node, data: &Node, path: &str, out: &mut Vec<Violation>) {
     let Some(items) = data.as_list() else {
         out.push(Violation::new(
@@ -368,6 +560,8 @@ fn check_list(schema: &Node, data: &Node, path: &str, out: &mut Vec<Violation>) 
         ));
         return;
     };
+    // Length constraints first (spec §10).
+    check_validation_for_list_or_map(schema, data, Builtin::List, path, out);
     let Some(element) = schema.as_map().and_then(|m| m.get("element")) else {
         out.push(Violation::new(path, "type: list requires an `element` key"));
         return;
@@ -379,14 +573,16 @@ fn check_list(schema: &Node, data: &Node, path: &str, out: &mut Vec<Violation>) 
 
 /// Verifies a `type: map` descriptor: `data` is a map (spec §5). Typed maps
 /// are written with the nested sub-schema form, so field contents are not
-/// checked here.
-fn check_map(_schema: &Node, data: &Node, path: &str, out: &mut Vec<Violation>) {
-    if data.as_map().is_none() {
+/// checked here. Enforces length constraints.
+fn check_map(schema: &Node, data: &Node, path: &str, out: &mut Vec<Violation>) {
+    let Some(_) = data.as_map() else {
         out.push(Violation::new(
             path,
             format!("expected a map, found {}", kind_of(data)),
         ));
-    }
+        return;
+    };
+    check_validation_for_list_or_map(schema, data, Builtin::Map, path, out);
 }
 
 /// Recursively checks `data` against `schema`, appending violations.
@@ -522,6 +718,290 @@ fn check_shape(base: Builtin, data: &Node, path: &str, out: &mut Vec<Violation>)
             format!("expected {expected}, found {}", shape_name(s.shape)),
         ));
     }
+}
+
+// Validation constraint enforcement (spec §10)
+//
+// String length is Unicode scalar count (`chars().count()`), not bytes;
+// `list`/`map` length is element/key count. This matches the spec table
+// “string length ≥ min_len” and “collection length (key count)”.
+
+fn check_validation_for_scalar(
+    schema: &Node,
+    data: &Node,
+    builtin: Builtin,
+    path: &str,
+    out: &mut Vec<Violation>,
+) {
+    let Some(s) = data.as_scalar() else { return; };
+    let Some(vmap) = schema
+        .as_map()
+        .and_then(|m| m.get("validation"))
+        .and_then(|n| n.as_map())
+    else {
+        return;
+    };
+    match builtin {
+        Builtin::Int => {
+            for (k, v) in vmap.iter() {
+                let bound = match v.as_scalar() {
+                    Some(b) => b.text.clone(),
+                    None => continue,
+                };
+                match k {
+                    "min" => {
+                        if cmp_int(&s.text, &bound) == core::cmp::Ordering::Less {
+                            out.push(Violation::new(
+                                path,
+                                format!("value {} is less than min {}", s.text, bound),
+                            ));
+                        }
+                    }
+                    "max" => {
+                        if cmp_int(&s.text, &bound) == core::cmp::Ordering::Greater {
+                            out.push(Violation::new(
+                                path,
+                                format!("value {} exceeds max {}", s.text, bound),
+                            ));
+                        }
+                    }
+                    "exclusive_min" => {
+                        if cmp_int(&s.text, &bound) != core::cmp::Ordering::Greater {
+                            out.push(Violation::new(
+                                path,
+                                format!(
+                                    "value {} must be greater than exclusive_min {}",
+                                    s.text, bound
+                                ),
+                            ));
+                        }
+                    }
+                    "exclusive_max" => {
+                        if cmp_int(&s.text, &bound) != core::cmp::Ordering::Less {
+                            out.push(Violation::new(
+                                path,
+                                format!(
+                                    "value {} must be less than exclusive_max {}",
+                                    s.text, bound
+                                ),
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Builtin::Float => {
+            for (k, v) in vmap.iter() {
+                let bound_sc = match v.as_scalar() {
+                    Some(b) => b,
+                    None => continue,
+                };
+                let bound = bound_sc.text.clone();
+                // Float grammar forbids '_' (spec §2). For int-shaped bounds on a
+                // float type, underscores are allowed (e.g. `min: 1_000` for float).
+                // So strip underscores only for Int-shaped bounds.
+                let data_f: f64 = s.text.parse().unwrap_or(f64::NAN);
+                let bound_f: f64 = if bound_sc.shape == Shape::Int {
+                    bound.replace('_', "").parse().unwrap_or(f64::NAN)
+                } else {
+                    bound.parse().unwrap_or(f64::NAN)
+                };
+                if data_f.is_nan() || bound_f.is_nan() {
+                    continue;
+                }
+                match k {
+                    "min" => {
+                        if data_f < bound_f {
+                            out.push(Violation::new(
+                                path,
+                                format!("value {} is less than min {}", s.text, bound),
+                            ));
+                        }
+                    }
+                    "max" => {
+                        if data_f > bound_f {
+                            out.push(Violation::new(
+                                path,
+                                format!("value {} exceeds max {}", s.text, bound),
+                            ));
+                        }
+                    }
+                    "exclusive_min" => {
+                        if data_f <= bound_f {
+                            out.push(Violation::new(
+                                path,
+                                format!(
+                                    "value {} must be greater than exclusive_min {}",
+                                    s.text, bound
+                                ),
+                            ));
+                        }
+                    }
+                    "exclusive_max" => {
+                        if data_f >= bound_f {
+                            out.push(Violation::new(
+                                path,
+                                format!(
+                                    "value {} must be less than exclusive_max {}",
+                                    s.text, bound
+                                ),
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Builtin::Str => {
+            let len = s.text.chars().count() as i64;
+            for (k, v) in vmap.iter() {
+                match k {
+                    "min_len" | "max_len" => {
+                        let bound: i64 = v
+                            .as_scalar()
+                            .map(|sc| sc.text.replace('_', "").parse::<i64>().unwrap_or(-1))
+                            .unwrap_or(-1);
+                        if bound < 0 {
+                            continue;
+                        }
+                        if k == "min_len" && len < bound {
+                            out.push(Violation::new(
+                                path,
+                                format!("length {} is less than min_len {}", len, bound),
+                            ));
+                        } else if k == "max_len" && len > bound {
+                            out.push(Violation::new(
+                                path,
+                                format!("length {} exceeds max_len {}", len, bound),
+                            ));
+                        }
+                    }
+                    "pattern" => {
+                        let pat = match v.as_scalar() {
+                            Some(sc) => sc.text.clone(),
+                            None => continue,
+                        };
+                        match regex_for_pattern(&pat) {
+                            Ok(re) => {
+                                if !re.is_match(&s.text) {
+                                    out.push(Violation::new(
+                                        path,
+                                        format!(
+                                            "value \"{}\" does not match pattern \"{}\"",
+                                            s.text, pat
+                                        ),
+                                    ));
+                                }
+                            }
+                            Err(_) => {
+                                out.push(Violation::new(
+                                    path,
+                                    format!("invalid pattern \"{}\"", pat),
+                                ));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn check_validation_for_list_or_map(
+    schema: &Node,
+    data: &Node,
+    builtin: Builtin,
+    path: &str,
+    out: &mut Vec<Violation>,
+) {
+    let Some(vmap) = schema
+        .as_map()
+        .and_then(|m| m.get("validation"))
+        .and_then(|n| n.as_map())
+    else {
+        return;
+    };
+    let len: i64 = match builtin {
+        Builtin::List => data.as_list().map(|l| l.len() as i64).unwrap_or(0),
+        Builtin::Map => data.as_map().map(|m| m.len() as i64).unwrap_or(0),
+        _ => return,
+    };
+    for (k, v) in vmap.iter() {
+        let bound: i64 = v
+            .as_scalar()
+            .map(|sc| sc.text.replace('_', "").parse::<i64>().unwrap_or(-1))
+            .unwrap_or(-1);
+        if bound < 0 {
+            continue;
+        }
+        if k == "min_len" && len < bound {
+            out.push(Violation::new(
+                path,
+                format!("length {} is less than min_len {}", len, bound),
+            ));
+        } else if k == "max_len" && len > bound {
+            out.push(Violation::new(
+                path,
+                format!("length {} exceeds max_len {}", len, bound),
+            ));
+        }
+    }
+}
+
+/// Compare two int literal texts (may contain '_' and sign) as integers.
+/// Returns Ordering.
+fn cmp_int(a: &str, b: &str) -> core::cmp::Ordering {
+    let a_clean = a.replace('_', "");
+    let b_clean = b.replace('_', "");
+    // Normalize sign and digits
+    let (a_neg, a_digits) = split_sign(&a_clean);
+    let (b_neg, b_digits) = split_sign(&b_clean);
+    let a_norm = normalize_digits(a_digits);
+    let b_norm = normalize_digits(b_digits);
+    // Both zero? Treat -0 == 0
+    let a_is_zero = a_norm == "0";
+    let b_is_zero = b_norm == "0";
+    let a_neg = if a_is_zero { false } else { a_neg };
+    let b_neg = if b_is_zero { false } else { b_neg };
+    match (a_neg, b_neg) {
+        (true, false) => return core::cmp::Ordering::Less,
+        (false, true) => return core::cmp::Ordering::Greater,
+        (true, true) => {
+            // both negative: larger magnitude is smaller
+            return cmp_abs(b_norm, a_norm);
+        }
+        (false, false) => {}
+    }
+    cmp_abs(a_norm, b_norm)
+}
+
+fn split_sign(s: &str) -> (bool, &str) {
+    if let Some(rest) = s.strip_prefix('-') {
+        (true, rest)
+    } else if let Some(rest) = s.strip_prefix('+') {
+        (false, rest)
+    } else {
+        (false, s)
+    }
+}
+
+fn normalize_digits(s: &str) -> &str {
+    let trimmed = s.trim_start_matches('0');
+    if trimmed.is_empty() {
+        "0"
+    } else {
+        trimmed
+    }
+}
+
+fn cmp_abs(a: &str, b: &str) -> core::cmp::Ordering {
+    if a.len() != b.len() {
+        return a.len().cmp(&b.len());
+    }
+    a.cmp(b)
 }
 
 /// Whether a schema node declares an optional leaf: a descriptor with
@@ -807,7 +1287,7 @@ mod tests {
 
     #[test]
     fn schema_list_must_declare_one_element() {
-        // `[]` leaf means any list — fine.
+        // `[]` leaf means any list.
         ok("a:\n  - 1\n", "a: []\n");
         let s = deserialize::from_str("a:\n  - int\n  - str\n").unwrap();
         let d = deserialize::from_str("a:\n  - 1\n").unwrap();
@@ -957,5 +1437,284 @@ mod tests {
             }
             other => panic!("expected Violations, got {other:?}"),
         }
+    }
+
+    // §10 Validation constraints
+    #[test]
+    fn int_validation_ranges() {
+        ok("a: 5\n", "a:\n  type: int\n  validation:\n    min: 0\n    max: 10\n");
+        assert!(errs("a: -1\n", "a:\n  type: int\n  validation:\n    min: 0\n")[0]
+            .message
+            .contains("less than min"));
+        assert!(errs("a: 11\n", "a:\n  type: int\n  validation:\n    max: 10\n")[0]
+            .message
+            .contains("exceeds max"));
+        ok(
+            "a: 5\n",
+            "a:\n  type: int\n  validation:\n    exclusive_min: 4\n    exclusive_max: 6\n",
+        );
+        assert!(errs("a: 4\n", "a:\n  type: int\n  validation:\n    exclusive_min: 4\n")[0]
+            .message
+            .contains("greater than exclusive_min"));
+        assert!(errs("a: 6\n", "a:\n  type: int\n  validation:\n    exclusive_max: 6\n")[0]
+            .message
+            .contains("less than exclusive_max"));
+        // underscore and big-int
+        ok("a: 1_000\n", "a:\n  type: int\n  validation:\n    min: 999\n");
+        assert!(errs("a: 1_000\n", "a:\n  type: int\n  validation:\n    max: 999\n")[0]
+            .message
+            .contains("exceeds max"));
+        ok(
+            "a: 99999999999999999999\n",
+            "a:\n  type: int\n  validation:\n    min: 99999999999999999998\n",
+        );
+        assert!(errs(
+            "a: 99999999999999999999\n",
+            "a:\n  type: int\n  validation:\n    max: 99999999999999999998\n"
+        )[0]
+            .message
+            .contains("exceeds max"));
+        ok(
+            "a: -5\n",
+            "a:\n  type: int\n  validation:\n    min: -10\n    max: 0\n",
+        );
+        assert!(errs("a: -15\n", "a:\n  type: int\n  validation:\n    min: -10\n")[0]
+            .message
+            .contains("less than min"));
+    }
+
+    #[test]
+    fn float_validation_ranges() {
+        ok(
+            "a: 1.5\n",
+            "a:\n  type: float\n  validation:\n    min: 0.5\n    max: 2.5\n",
+        );
+        assert!(errs("a: 0.4\n", "a:\n  type: float\n  validation:\n    min: 0.5\n")[0]
+            .message
+            .contains("less than min"));
+        assert!(errs("a: 3.0\n", "a:\n  type: float\n  validation:\n    max: 2.5\n")[0]
+            .message
+            .contains("exceeds max"));
+        ok(
+            "a: 1.0\n",
+            "a:\n  type: float\n  validation:\n    exclusive_min: 0.5\n    exclusive_max: 1.5\n",
+        );
+        assert!(errs("a: 0.5\n", "a:\n  type: float\n  validation:\n    exclusive_min: 0.5\n")[0]
+            .message
+            .contains("greater than exclusive_min"));
+        // int-shaped bound on float is allowed
+        ok("a: 1.5\n", "a:\n  type: float\n  validation:\n    min: 1\n");
+    }
+
+    #[test]
+    fn str_validation_lengths_and_pattern() {
+        ok(
+            "a: \"hello\"\n",
+            "a:\n  type: str\n  validation:\n    min_len: 3\n    max_len: 10\n",
+        );
+        assert!(errs("a: \"hi\"\n", "a:\n  type: str\n  validation:\n    min_len: 3\n")[0]
+            .message
+            .contains("less than min_len"));
+        assert!(errs(
+            "a: \"hello world long\"\n",
+            "a:\n  type: str\n  validation:\n    max_len: 5\n"
+        )[0]
+            .message
+            .contains("exceeds max_len"));
+        // Unicode scalar count (é = 1 char, 2 bytes)
+        ok("a: \"é\"\n", "a:\n  type: str\n  validation:\n    min_len: 1\n    max_len: 1\n");
+        assert!(errs("a: \"é\"\n", "a:\n  type: str\n  validation:\n    max_len: 0\n")[0]
+            .message
+            .contains("exceeds max_len"));
+        // pattern full-match
+        ok(
+            "a: \"abc123\"\n",
+            "a:\n  type: str\n  validation:\n    pattern: \"^[a-z]+[0-9]+$\"\n",
+        );
+        assert!(errs(
+            "a: \"ABC\"\n",
+            "a:\n  type: str\n  validation:\n    pattern: \"^[a-z]+$\"\n"
+        )[0]
+            .message
+            .contains("does not match pattern"));
+        // "foo" must not match "foobar" (full-match)
+        assert!(errs(
+            "a: \"foobar\"\n",
+            "a:\n  type: str\n  validation:\n    pattern: \"foo\"\n"
+        )[0]
+            .message
+            .contains("does not match pattern"));
+        ok(
+            "a: \"foo\"\n",
+            "a:\n  type: str\n  validation:\n    pattern: \"foo\"\n",
+        );
+        ok(
+            "a: \"a-b_c\"\n",
+            "a:\n  type: str\n  validation:\n    pattern: \"^[a-z][a-z0-9_-]*$\"\n",
+        );
+    }
+
+    #[test]
+    fn list_and_map_validation_lengths() {
+        ok(
+            "a:\n  - 1\n  - 2\n",
+            "a:\n  type: list\n  element: int\n  validation:\n    min_len: 1\n    max_len: 3\n",
+        );
+        assert!(errs("a: []\n", "a:\n  type: list\n  element: int\n  validation:\n    min_len: 1\n")[0]
+            .message
+            .contains("less than min_len"));
+        assert!(errs(
+            "a:\n  - 1\n  - 2\n  - 3\n  - 4\n",
+            "a:\n  type: list\n  element: int\n  validation:\n    max_len: 3\n"
+        )[0]
+            .message
+            .contains("exceeds max_len"));
+        ok(
+            "a:\n  x: 1\n",
+            "a:\n  type: map\n  validation:\n    min_len: 1\n",
+        );
+        assert!(errs("a: {}\n", "a:\n  type: map\n  validation:\n    min_len: 1\n")[0]
+            .message
+            .contains("less than min_len"));
+        assert!(errs(
+            "a:\n  x: 1\n  y: 2\n",
+            "a:\n  type: map\n  validation:\n    max_len: 1\n"
+        )[0]
+            .message
+            .contains("exceeds max_len"));
+    }
+
+    #[test]
+    fn validation_skipped_for_null_and_absent() {
+        ok(
+            "a: null\n",
+            "a:\n  type: int\n  optional: true\n  validation:\n    min: 0\n",
+        );
+        ok(
+            "a: null\n",
+            "a:\n  type: list\n  element: int\n  optional: true\n  validation:\n    min_len: 10\n",
+        );
+        ok(
+            "a: null\n",
+            "a:\n  type: map\n  optional: true\n  validation:\n    min_len: 1\n",
+        );
+        // absent optional with validation
+        ok("a: 1\n", "a: int\nb:\n  type: str\n  optional: true\n  validation:\n    min_len: 1\n");
+        // list element validation with null skipping
+        ok(
+            "a:\n  - 1\n  - null\n",
+            "a:\n  type: list\n  element:\n    type: int\n    optional: true\n    validation:\n      min: 0\n",
+        );
+    }
+
+    #[test]
+    fn list_element_validation() {
+        ok(
+            "a:\n  - \"abc\"\n  - \"def\"\n",
+            "a:\n  type: list\n  element:\n    type: str\n    validation:\n      pattern: \"^[a-z]+$\"\n",
+        );
+        assert!(errs(
+            "a:\n  - \"ABC\"\n",
+            "a:\n  type: list\n  element:\n    type: str\n    validation:\n      pattern: \"^[a-z]+$\"\n"
+        )[0]
+            .message
+            .contains("does not match pattern"));
+        ok(
+            "a:\n  - 5\n  - 6\n",
+            "a:\n  type: list\n  element:\n    type: int\n    validation:\n      min: 0\n      max: 10\n",
+        );
+        assert!(errs(
+            "a:\n  - 11\n",
+            "a:\n  type: list\n  element:\n    type: int\n    validation:\n      max: 10\n"
+        )[0]
+            .message
+            .contains("exceeds max"));
+    }
+
+    #[test]
+    fn validation_unknown_constraint_is_schema_malformed() {
+        let d = deserialize::from_str("a: 1\n").unwrap();
+        for (schema, expect) in [
+            (
+                "a:\n  type: int\n  validation:\n    pattern: \"foo\"\n",
+                "unknown constraint",
+            ),
+            (
+                "a:\n  type: str\n  validation:\n    min: 0\n",
+                "unknown constraint",
+            ),
+            (
+                "a:\n  type: bool\n  validation:\n    min_len: 1\n",
+                "unknown constraint",
+            ),
+            (
+                "a:\n  type: list\n  element: int\n  validation:\n    pattern: \"foo\"\n",
+                "unknown constraint",
+            ),
+        ] {
+            let s = deserialize::from_str(schema).unwrap();
+            match verify(&d, &s) {
+                Err(VerifyError::SchemaMalformed(v)) => {
+                    assert!(
+                        v.iter().any(|x| x.message.contains(expect)),
+                        "expected '{expect}' in {v:?} for schema {schema}"
+                    );
+                }
+                other => panic!("expected SchemaMalformed for {schema}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn validation_schema_malformed_cases() {
+        let d = deserialize::from_str("a: 1\n").unwrap();
+        // invalid regex
+        let s = deserialize::from_str("a:\n  type: str\n  validation:\n    pattern: \"[\"\n").unwrap();
+        assert!(matches!(
+            verify(&d, &s),
+            Err(VerifyError::SchemaMalformed(_))
+        ));
+        // RE2 dialect: look-around not supported
+        let s =
+            deserialize::from_str("a:\n  type: str\n  validation:\n    pattern: \"(?<=a)b\"\n")
+                .unwrap();
+        match verify(&d, &s) {
+            Err(VerifyError::SchemaMalformed(v)) => {
+                assert!(v.iter().any(|x| x.message.contains("invalid pattern")));
+            }
+            other => panic!("expected SchemaMalformed for look-around, got {other:?}"),
+        }
+        // validation not a map
+        let s = deserialize::from_str("a:\n  type: int\n  validation: 0\n").unwrap();
+        assert!(matches!(
+            verify(&d, &s),
+            Err(VerifyError::SchemaMalformed(_))
+        ));
+        // descriptor requires type
+        let s = deserialize::from_str("a:\n  validation:\n    min: 0\n").unwrap();
+        assert!(matches!(
+            verify(&d, &s),
+            Err(VerifyError::SchemaMalformed(_))
+        ));
+        // extra descriptor key
+        let s = deserialize::from_str("a:\n  type: int\n  foo: bar\n").unwrap();
+        match verify(&d, &s) {
+            Err(VerifyError::SchemaMalformed(v)) => {
+                assert!(v.iter().any(|x| x.message.contains("unknown key")));
+            }
+            other => panic!("expected SchemaMalformed for extra key, got {other:?}"),
+        }
+        // optional not bool
+        let s = deserialize::from_str("a:\n  type: int\n  optional: \"true\"\n").unwrap();
+        assert!(matches!(
+            verify(&d, &s),
+            Err(VerifyError::SchemaMalformed(_))
+        ));
+        // element only for list
+        let s = deserialize::from_str("a:\n  type: int\n  element: int\n").unwrap();
+        assert!(matches!(
+            verify(&d, &s),
+            Err(VerifyError::SchemaMalformed(_))
+        ));
     }
 }

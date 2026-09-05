@@ -758,9 +758,13 @@ fn scan_escapes(s: &str, line_no: usize, col: usize) -> Result<String> {
     Ok(out)
 }
 
-/// Truncates `s` at the first `#` that sits outside a double-quoted string.
+/// Truncates `s` at the first `#` that sits outside a quoted string.
+///
+/// Double-quoted strings respect `\` escapes; single-quoted strings are
+/// literal and cannot contain `'` (spec §3), so no escape handling is needed.
 fn strip_comment(s: &str) -> &str {
     let mut in_dq = false;
+    let mut in_sq = false;
     let mut esc = false;
     for (i, ch) in s.char_indices() {
         if in_dq {
@@ -769,10 +773,15 @@ fn strip_comment(s: &str) -> &str {
                 '"' if !esc => in_dq = false,
                 _ => esc = false,
             }
+        } else if in_sq {
+            if ch == '\'' {
+                in_sq = false;
+            }
         } else {
             match ch {
                 '#' => return &s[..i],
                 '"' => in_dq = true,
+                '\'' => in_sq = true,
                 _ => {}
             }
         }
@@ -780,9 +789,13 @@ fn strip_comment(s: &str) -> &str {
     s
 }
 
-/// Errors when a tab appears outside a double-quoted string (spec §2).
+/// Errors when a tab appears outside a quoted string (spec §2).
+///
+/// Tabs are allowed only inside `"..."` / `"""` blocks and `''` literals;
+/// single-quoted strings are literal (no escapes).
 fn check_tab(s: &str, line_no: usize, base_col: usize) -> Result<()> {
     let mut in_dq = false;
+    let mut in_sq = false;
     let mut esc = false;
     for (i, ch) in s.char_indices() {
         if in_dq {
@@ -790,6 +803,10 @@ fn check_tab(s: &str, line_no: usize, base_col: usize) -> Result<()> {
                 '\\' => esc = !esc,
                 '"' if !esc => in_dq = false,
                 _ => esc = false,
+            }
+        } else if in_sq {
+            if ch == '\'' {
+                in_sq = false;
             }
         } else {
             match ch {
@@ -802,6 +819,7 @@ fn check_tab(s: &str, line_no: usize, base_col: usize) -> Result<()> {
                     ));
                 }
                 '"' => in_dq = true,
+                '\'' => in_sq = true,
                 _ => {}
             }
         }

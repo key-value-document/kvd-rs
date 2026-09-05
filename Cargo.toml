@@ -1,6 +1,6 @@
 [package]
 name = "kvd-rs"
-description = "KVD — Key-Value Document format: value model, error model, and serializer"
+description = "KVD — Key-Value Document format: value model, error model, serializer, and §10 validation"
 version = "1.0.0"
 edition = "2024"
 rust-version = "1.85.0"
@@ -13,6 +13,7 @@ exclude = [".github/**", ".gitignore"]
 
 [dependencies]
 serde = { version = "1.0.0", optional = true }
+regex = "1"
 
 [dev-dependencies]
 serde = { version = "1.0.0", features = ["derive"] }
