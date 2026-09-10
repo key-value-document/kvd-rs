@@ -2,7 +2,7 @@
 //!
 //! Spelling is re-derived from the value model rather than echoed from
 //! [`Scalar::raw`]: every string value is double-quoted, except the six
-//! builtin type names (`int`, `str`, `bool`, `float`, `list`, `map`) which stay
+//! builtin type names (`int`, `str`, `bool`, `float`, `list`, `dict`) which stay
 //! bare for schema documents (spec §4). Strings containing newlines use the
 //! `"""` block form.
 
@@ -90,6 +90,10 @@ fn emit_pair(
                 emit_map(m, keycol + 2, depth + 1, out)?;
             }
         }
+        Node::Dict(m) => {
+            writeln!(out, "{}{}:", " ".repeat(keycol), key)?;
+            emit_dict(m, keycol + 2, depth + 1, out)?;
+        }
         Node::List(items) => {
             if items.is_empty() {
                 writeln!(out, "{}{}: []", " ".repeat(keycol), key)?;
@@ -101,6 +105,70 @@ fn emit_pair(
         Node::Scalar(s) => {
             write!(out, "{}{}: ", " ".repeat(keycol), key)?;
             write_scalar_value(s, keycol, keycol, out)?;
+            writeln!(out)?;
+        }
+    }
+    Ok(())
+}
+
+/// Emits a dict whose `=` markers start at `indent` (spec §8.2).
+/// Dict entry keys are always double-quoted, even when they look bare.
+/// An empty dict emits no entries; the caller never produces one (empty
+/// dicts use the `{}` literal), so this emits nothing for empty input.
+fn emit_dict(m: &Map, indent: usize, depth: usize, out: &mut String) -> Result<(), SerializeError> {
+    if depth > crate::MAX_DEPTH {
+        return Err(SerializeError::new(
+            "nesting exceeds the maximum depth of 100",
+        ));
+    }
+    let pad = " ".repeat(indent);
+    for (key, node) in m.iter() {
+        emit_entry(key, node, indent, &pad, depth, out)?;
+    }
+    Ok(())
+}
+
+/// Emits one `= "k": value` dict entry whose marker starts at `indent`.
+/// `entry_col` is the column of the entry key (content sits two past it).
+fn emit_entry(
+    key: &str,
+    node: &Node,
+    indent: usize,
+    pad: &str,
+    depth: usize,
+    out: &mut String,
+) -> Result<(), SerializeError> {
+    let entry_col = indent + 2;
+    // Dict keys are opaque and always double-quoted (spec §8.2).
+    let qkey = escape(key);
+    // Subtrees hang off the entry marker: two past `indent` (like a bare
+    // `-` item's content), not two past the key. The key is inline on the
+    // marker line, so `= "k":` at indent 2 nests `- x` at indent 4.
+    let sub = indent + 2;
+    match node {
+        Node::Map(m) => {
+            if m.is_empty() {
+                writeln!(out, "{pad}= {qkey}: {{}}")?;
+            } else {
+                writeln!(out, "{pad}= {qkey}:")?;
+                emit_map(m, sub, depth + 1, out)?;
+            }
+        }
+        Node::Dict(m) => {
+            writeln!(out, "{pad}= {qkey}:")?;
+            emit_dict(m, sub, depth + 1, out)?;
+        }
+        Node::List(items) => {
+            if items.is_empty() {
+                writeln!(out, "{pad}= {qkey}: []")?;
+            } else {
+                writeln!(out, "{pad}= {qkey}:")?;
+                emit_list(items, sub, depth + 1, out)?;
+            }
+        }
+        Node::Scalar(s) => {
+            write!(out, "{pad}= {qkey}: ")?;
+            write_scalar_value(s, entry_col, entry_col, out)?;
             writeln!(out)?;
         }
     }
@@ -144,6 +212,21 @@ fn emit_list(
                     emit_list(items2, indent + 2, depth + 1, out)?;
                 }
             }
+            Node::Dict(m) => {
+                if m.is_empty() {
+                    writeln!(out, "{}- {{}}", pad)?;
+                    continue;
+                }
+                // First entry inlined after the `-` (spec §4
+                // `'- ' entry`); the rest align to its column.
+                let mut iter = m.iter();
+                let (first_key, first_value) = iter.next().expect("non-empty dict");
+                let entry_col = indent + 2;
+                emit_inline_entry(first_key, first_value, entry_col, out, &pad, depth)?;
+                for (key, node) in iter {
+                    emit_entry(key, node, entry_col, &" ".repeat(entry_col), depth, out)?;
+                }
+            }
             Node::Scalar(s) => {
                 write!(out, "{}- ", pad)?;
                 write_scalar_value(s, indent, indent + 2, out)?;
@@ -181,9 +264,60 @@ fn emit_inline_pair(
                 emit_list(items, keycol + 2, depth + 1, out)?;
             }
         }
+        Node::Dict(m) => {
+            if m.is_empty() {
+                writeln!(out, "{}- {}: {{}}", pad, key)?;
+            } else {
+                writeln!(out, "{}- {}:", pad, key)?;
+                emit_dict(m, keycol + 2, depth + 1, out)?;
+            }
+        }
         Node::Scalar(s) => {
             write!(out, "{}- {}: ", pad, key)?;
             write_scalar_value(s, keycol, keycol, out)?;
+            writeln!(out)?;
+        }
+    }
+    Ok(())
+}
+
+/// Emits the first dict entry of a list-item dict, inlined after the `-`
+/// (`- = "k": v`, spec §4). `entry_col` is the column of the entry key.
+fn emit_inline_entry(
+    key: &str,
+    node: &Node,
+    entry_col: usize,
+    out: &mut String,
+    pad: &str,
+    depth: usize,
+) -> Result<(), SerializeError> {
+    let qkey = escape(key);
+    // `entry_col` is the rewritten `=` marker column (two past the `-`),
+    // so subtrees sit two past it — mirroring `parse_entry`.
+    match node {
+        Node::Map(m) => {
+            if m.is_empty() {
+                writeln!(out, "{pad}- = {qkey}: {{}}")?;
+            } else {
+                writeln!(out, "{pad}- = {qkey}:")?;
+                emit_map(m, entry_col + 2, depth + 1, out)?;
+            }
+        }
+        Node::Dict(m) => {
+            writeln!(out, "{pad}- = {qkey}:")?;
+            emit_dict(m, entry_col + 2, depth + 1, out)?;
+        }
+        Node::List(items) => {
+            if items.is_empty() {
+                writeln!(out, "{pad}- = {qkey}: []")?;
+            } else {
+                writeln!(out, "{pad}- = {qkey}:")?;
+                emit_list(items, entry_col + 2, depth + 1, out)?;
+            }
+        }
+        Node::Scalar(s) => {
+            write!(out, "{pad}- = {qkey}: ")?;
+            write_scalar_value(s, entry_col, entry_col, out)?;
             writeln!(out)?;
         }
     }
@@ -325,7 +459,7 @@ fn emit_triple(
 
 /// Emits `s` bare or double-quoted.
 ///
-/// Builtin type names (`int`, `str`, `bool`, `float`, `list`, `map`) stay
+/// Builtin type names (`int`, `str`, `bool`, `float`, `list`, `dict`) stay
 /// bare — they are only valid in schema position and must not be quoted there
 /// (spec §4). All other strings are double-quoted; strings containing
 /// newlines use the `"""` block form.
@@ -694,5 +828,62 @@ mod tests {
         let schema = crate::deserialize::from_str("__schema__:\n  a: int\n").unwrap();
         let out = to_string(&schema).unwrap();
         assert_eq!(out, "__schema__:\n  a: int\n");
+    }
+
+    #[test]
+    fn dict_keys_always_quoted() {
+        // Dict entry keys stay double-quoted even when they look bare.
+        let mut m = Map::new();
+        m.insert("team".into(), scalar(Shape::Str, "web"));
+        m.insert("a.b/c".into(), scalar(Shape::Int, "1"));
+        let d = doc(&[("labels", Node::dict(m))]);
+        assert_eq!(
+            to_string(&d).unwrap(),
+            "labels:\n  = \"team\": \"web\"\n  = \"a.b/c\": 1\n"
+        );
+    }
+
+    #[test]
+    fn dict_subtrees_hang_off_marker() {
+        // Value subtrees sit two past the `=` marker.
+        let mut inner = Map::new();
+        inner.insert("amy".into(), scalar(Shape::Str, "x"));
+        let mut m = Map::new();
+        m.insert(
+            "team-a".into(),
+            Node::list(vec![scalar(Shape::Str, "amy"), scalar(Shape::Str, "bo")]),
+        );
+        m.insert("plain".into(), scalar(Shape::Int, "1"));
+        let d = doc(&[("groups", Node::dict(m))]);
+        let out = to_string(&d).unwrap();
+        assert_eq!(
+            out,
+            "groups:\n  = \"team-a\":\n    - \"amy\"\n    - \"bo\"\n  = \"plain\": 1\n"
+        );
+        // Round-trips through the parser.
+        assert_eq!(crate::deserialize::from_str(&out).unwrap(), d);
+    }
+
+    #[test]
+    fn dict_in_list_item_inlines_first_entry() {
+        let mut m = Map::new();
+        m.insert("a".into(), scalar(Shape::Int, "1"));
+        m.insert("d".into(), scalar(Shape::Int, "2"));
+        let d = doc(&[("items", Node::list(vec![Node::dict(m)]))]);
+        let out = to_string(&d).unwrap();
+        assert_eq!(out, "items:\n  - = \"a\": 1\n    = \"d\": 2\n");
+        assert_eq!(crate::deserialize::from_str(&out).unwrap(), d);
+    }
+
+    #[test]
+    fn nested_dict_emits_nested_entries() {
+        let mut inner = Map::new();
+        inner.insert("b".into(), scalar(Shape::Int, "1"));
+        let mut m = Map::new();
+        m.insert("a".into(), Node::dict(inner));
+        let d = doc(&[("outer", Node::dict(m))]);
+        let out = to_string(&d).unwrap();
+        assert_eq!(out, "outer:\n  = \"a\":\n    = \"b\": 1\n");
+        assert_eq!(crate::deserialize::from_str(&out).unwrap(), d);
     }
 }

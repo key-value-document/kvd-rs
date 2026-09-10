@@ -36,7 +36,7 @@ impl Serialize for Node {
                 Shape::Bool => serializer.serialize_bool(s.text == "true"),
                 Shape::Null => serializer.serialize_none(),
             },
-            Node::Map(m) => {
+            Node::Map(m) | Node::Dict(m) => {
                 let mut map = serializer.serialize_map(Some(m.len()))?;
                 for (k, v) in m.iter() {
                     map.serialize_entry(k, v)?;

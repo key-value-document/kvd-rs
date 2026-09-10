@@ -53,7 +53,7 @@ pub fn is_type_name(s: &str) -> bool {
 }
 
 /// The six builtin type names (`int`, `float`, `bool`, `str`, `list`,
-/// `map`) — spec §5. These are the only bare words permitted in value
+/// `dict`) — spec §5. These are the only bare words permitted in value
 /// position; they are meaningful only in schema position. Optionality is
 /// expressed with `optional: true` in a descriptor block.
 ///
@@ -62,7 +62,7 @@ pub fn is_type_name(s: &str) -> bool {
 /// whose text equals one of these names is also emitted bare; re-parsing it
 /// yields an equal `Str` scalar, so the value round-trips.
 pub fn is_builtin_type(s: &str) -> bool {
-    matches!(s, "int" | "float" | "bool" | "str" | "list" | "map")
+    matches!(s, "int" | "float" | "bool" | "str" | "list" | "dict")
 }
 
 /// True when `s` spells an int or float literal (spec §3 `int`/`float`).
@@ -430,7 +430,7 @@ mod tests {
         assert!(is_builtin_type("bool"));
         assert!(is_builtin_type("str"));
         assert!(is_builtin_type("list"));
-        assert!(is_builtin_type("map"));
+        assert!(is_builtin_type("dict"));
         assert!(!is_builtin_type("Int"));
         assert!(!is_builtin_type("INT"));
         assert!(!is_builtin_type("ints"));

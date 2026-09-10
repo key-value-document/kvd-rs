@@ -209,7 +209,7 @@ pub fn get<'a>(doc: &'a Node, path: &Path) -> Option<&'a Node> {
     let mut cur = doc;
     for seg in &path.segments {
         cur = match seg {
-            Segment::Key(k) => cur.as_map()?.get(k)?,
+            Segment::Key(k) => cur.as_keyed()?.get(k)?,
             Segment::Index(i) => cur.as_list()?.get(*i)?,
         };
     }
@@ -222,7 +222,7 @@ pub fn get_mut<'a>(doc: &'a mut Node, path: &Path) -> Option<&'a mut Node> {
     let mut cur = doc;
     for seg in &path.segments {
         cur = match seg {
-            Segment::Key(k) => cur.as_map_mut()?.get_mut(k)?,
+            Segment::Key(k) => cur.as_keyed_mut()?.get_mut(k)?,
             Segment::Index(i) => cur.as_list_mut()?.get_mut(*i)?,
         };
     }
@@ -243,7 +243,7 @@ pub fn set(doc: &mut Node, path: &Path, value: Node) -> Result<(), OpError> {
 fn do_set(node: &mut Node, segs: &[Segment], value: Node) -> Result<(), OpError> {
     match &segs[0] {
         Segment::Key(k) => {
-            let map = node.as_map_mut().ok_or(OpError::NotAMap)?;
+            let map = node.as_keyed_mut().ok_or(OpError::NotAMap)?;
             if segs.len() == 1 {
                 if let Some(existing) = map.get_mut(k) {
                     *existing = value;
@@ -297,7 +297,7 @@ pub fn remove_recursive(doc: &mut Node, path: &Path) -> Result<Option<Node>, OpE
 fn do_remove(node: &mut Node, segs: &[Segment], prune: bool) -> Result<Option<Node>, OpError> {
     match &segs[0] {
         Segment::Key(k) => {
-            let map = node.as_map_mut().ok_or(OpError::NotAMap)?;
+            let map = node.as_keyed_mut().ok_or(OpError::NotAMap)?;
             if segs.len() == 1 {
                 let idx = map
                     .entries()
@@ -314,7 +314,7 @@ fn do_remove(node: &mut Node, segs: &[Segment], prune: bool) -> Result<Option<No
                 removed = do_remove(child, &segs[1..], prune)?;
             }
             if prune {
-                if let Some(Node::Map(inner)) = map.get(k) {
+                if let Some(inner) = map.get(k).and_then(|n| n.as_keyed()) {
                     if inner.is_empty() {
                         let idx = map.entries().iter().position(|(key, _)| key == k).unwrap();
                         map.remove_at(idx);

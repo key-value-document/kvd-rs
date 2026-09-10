@@ -1,8 +1,10 @@
 //! Value model for KVD (spec §5).
 //!
 //! A document is an ordered map of keys to nodes; a node is a scalar, a
-//! map, or a list. Maps preserve insertion order. Scalars keep enough raw
-//! fidelity (original token, block mode) for the emitter to normalize
+//! map, a dict, or a list. Maps (node prefixes) and dicts (`=` entries)
+//! share the [`Map`] storage but are distinct variants so the emitter can
+//! reproduce the canonical `=` spelling (spec §8.2). Scalars keep enough
+//! raw fidelity (original token, block mode) for the emitter to normalize
 //! spelling without losing information.
 
 #[cfg(not(any(test, feature = "serde")))]
@@ -219,14 +221,16 @@ impl IntoIterator for Map {
     }
 }
 
-/// A KVD node: scalar, map, or list.
+/// A KVD node: scalar, map, dict, or list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Node {
     /// A scalar value.
     Scalar(Scalar),
-    /// An ordered mapping.
+    /// An ordered mapping of node prefixes (nested `key:` blocks).
     Map(Map),
+    /// An ordered dict value (`= "k": v` entries, spec §4).
+    Dict(Map),
     /// An ordered list.
     List(Vec<Node>),
 }
@@ -240,6 +244,11 @@ impl Node {
     /// Creates a map node.
     pub fn map(map: Map) -> Self {
         Node::Map(map)
+    }
+
+    /// Creates a dict node.
+    pub fn dict(map: Map) -> Self {
+        Node::Dict(map)
     }
 
     /// Creates a list node.
@@ -279,6 +288,38 @@ impl Node {
         }
     }
 
+    /// Borrows this node as a dict, if it is one.
+    pub fn as_dict(&self) -> Option<&Map> {
+        match self {
+            Node::Dict(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Borrows this node mutably as a dict, if it is one.
+    pub fn as_dict_mut(&mut self) -> Option<&mut Map> {
+        match self {
+            Node::Dict(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Borrows this node as a keyed collection, whether map or dict.
+    pub fn as_keyed(&self) -> Option<&Map> {
+        match self {
+            Node::Map(m) | Node::Dict(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Borrows this node mutably as a keyed collection, whether map or dict.
+    pub fn as_keyed_mut(&mut self) -> Option<&mut Map> {
+        match self {
+            Node::Map(m) | Node::Dict(m) => Some(m),
+            _ => None,
+        }
+    }
+
     /// Borrows this node as a list, if it is one.
     pub fn as_list(&self) -> Option<&[Node]> {
         match self {
@@ -295,14 +336,15 @@ impl Node {
         }
     }
 
-    /// Navigates this node as a map and returns the child for `key`.
+    /// Navigates this node as a keyed collection (map or dict) and
+    /// returns the child for `key`.
     ///
-    /// Errors if this node is not a map (e.g. it is a scalar or a list),
+    /// Errors if this node is not keyed (e.g. it is a scalar or a list),
     /// or if `key` is absent. Use [`Node::get_opt`] when a missing key
     /// should yield `None` instead of an error. For errors that name the
     /// full navigation chain (e.g. `a.b.c`), use [`Node::get_path`].
     pub fn get(&self, key: &str) -> Result<&Node> {
-        let map = self.as_map().ok_or_else(|| {
+        let map = self.as_keyed().ok_or_else(|| {
             Error::new(
                 ErrorKind::NotAMap,
                 0,
@@ -324,14 +366,14 @@ impl Node {
     }
 
     /// Like [`Node::get`], but returns `None` instead of erroring when the
-    /// node is not a map or the key is absent.
+    /// node is not keyed or the key is absent.
     pub fn get_opt(&self, key: &str) -> Option<&Node> {
-        self.as_map().and_then(|m| m.get(key))
+        self.as_keyed().and_then(|m| m.get(key))
     }
 
     /// Mutable counterpart of [`Node::get`].
     pub fn get_mut(&mut self, key: &str) -> Result<&mut Node> {
-        let map = self.as_map_mut().ok_or_else(|| {
+        let map = self.as_keyed_mut().ok_or_else(|| {
             Error::new(
                 ErrorKind::NotAMap,
                 0,
@@ -351,12 +393,13 @@ impl Node {
 
     /// Mutable counterpart of [`Node::get_opt`].
     pub fn get_opt_mut(&mut self, key: &str) -> Option<&mut Node> {
-        self.as_map_mut().and_then(|m| m.get_mut(key))
+        self.as_keyed_mut().and_then(|m| m.get_mut(key))
     }
 
     /// Navigates a full key path (e.g. `["a", "b", "c"]`) through nested
-    /// maps, returning the deepest node. The error message carries the full
-    /// chain, e.g. `a.b.c: key not found` or `d.e.f: node is not a map`.
+    /// keyed nodes (maps and dicts), returning the deepest node. The error
+    /// message carries the full chain, e.g. `a.b.c: key not found` or
+    /// `d.e.f: node is not a map`.
     pub fn get_path(&self, path: &[&str]) -> Result<&Node> {
         self.get_path_inner(path.iter().copied(), "")
     }
@@ -408,7 +451,7 @@ impl Node {
             None => Ok(self),
             Some(key) => {
                 let here = join_path(prefix, key);
-                let map = self.as_map().ok_or_else(|| {
+                let map = self.as_keyed().ok_or_else(|| {
                     let loc = if prefix.is_empty() {
                         "root".to_string()
                     } else {
@@ -445,7 +488,7 @@ impl Node {
                 // Check shape with a transient immutable borrow so the error
                 // branch can describe `self` without conflicting with the
                 // mutable descent below.
-                if self.as_map().is_none() {
+                if self.as_keyed().is_none() {
                     let loc = if prefix.is_empty() {
                         "root".to_string()
                     } else {
@@ -458,7 +501,7 @@ impl Node {
                         format!("{loc} is {}; cannot index `{key}`", non_map_kind(self)),
                     ));
                 }
-                let map = self.as_map_mut().unwrap();
+                let map = self.as_keyed_mut().unwrap();
                 let child = match map.get_mut(key) {
                     Some(child) => child,
                     None => {
@@ -491,6 +534,7 @@ fn non_map_kind(node: &Node) -> String {
         Node::Scalar(s) => format!("a scalar ({})", s.shape),
         Node::List(_) => "a list".to_string(),
         Node::Map(_) => "a map".to_string(),
+        Node::Dict(_) => "a dict".to_string(),
     }
 }
 

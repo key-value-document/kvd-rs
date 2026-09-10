@@ -25,7 +25,7 @@ fn describe(node: &Node) -> de::Unexpected<'_> {
             Shape::Str => de::Unexpected::Str(&s.text),
             Shape::Null => de::Unexpected::Unit,
         },
-        Node::Map(_) => de::Unexpected::Map,
+        Node::Map(_) | Node::Dict(_) => de::Unexpected::Map,
         Node::List(_) => de::Unexpected::Seq,
     }
 }
@@ -96,7 +96,7 @@ impl<'de> Deserializer<'de> for NodeDe<'de> {
     fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, SerdeError> {
         match self.node {
             Node::Scalar(s) => visit_by_shape(s, visitor),
-            Node::Map(m) => visitor.visit_map(MapDe::new(m)),
+            Node::Map(m) | Node::Dict(m) => visitor.visit_map(MapDe::new(m)),
             Node::List(l) => visitor.visit_seq(SeqDe::new(l)),
         }
     }
@@ -228,7 +228,7 @@ impl<'de> Deserializer<'de> for NodeDe<'de> {
 
     fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, SerdeError> {
         match self.node {
-            Node::Map(m) => visitor.visit_map(MapDe::new(m)),
+            Node::Map(m) | Node::Dict(m) => visitor.visit_map(MapDe::new(m)),
             _ => Err(de::Error::invalid_type(describe(self.node), &"a map")),
         }
     }
@@ -254,7 +254,7 @@ impl<'de> Deserializer<'de> for NodeDe<'de> {
                 visitor.visit_enum(UnitVariantDe { name: &s.text })
             }
             // Single-entry map: externally tagged variant with payload.
-            Node::Map(m) => {
+            Node::Map(m) | Node::Dict(m) => {
                 let mut iter = m.iter();
                 let Some((key, value)) = iter.next() else {
                     return Err(de::Error::custom(

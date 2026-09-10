@@ -17,6 +17,9 @@ pub enum ErrorKind {
     Tab,
     /// A `-` marker is not followed by exactly one space.
     BadListMarker,
+    /// An `=` marker is not followed by exactly one space plus a quoted
+    /// key on the same line (spec §6).
+    BadDictMarker,
     /// A list-item key does not align with the first key of its item.
     MisalignedKey,
     /// A key has no value and no indented subtree.
@@ -50,6 +53,7 @@ impl ErrorKind {
             ErrorKind::BadIndent => "bad-indent",
             ErrorKind::Tab => "tab",
             ErrorKind::BadListMarker => "bad-list-marker",
+            ErrorKind::BadDictMarker => "bad-dict-marker",
             ErrorKind::MisalignedKey => "misaligned-key",
             ErrorKind::MissingValue => "missing-value",
             ErrorKind::DuplicateKey => "duplicate-key",
@@ -122,6 +126,7 @@ mod tests {
     #[test]
     fn error_kind_names() {
         assert_eq!(ErrorKind::BadIndent.as_str(), "bad-indent");
+        assert_eq!(ErrorKind::BadDictMarker.as_str(), "bad-dict-marker");
         assert_eq!(
             ErrorKind::UnexpectedCharacter.as_str(),
             "unexpected-character"

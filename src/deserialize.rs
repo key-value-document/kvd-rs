@@ -52,6 +52,12 @@ impl Line {
         let s = self.stripped();
         s == "-" || s.starts_with("- ")
     }
+
+    /// True when this line starts a dict entry (`=`, `= `, `= x`).
+    fn is_dict_marker(&self) -> bool {
+        let s = self.stripped();
+        s == "=" || s.starts_with("= ")
+    }
 }
 
 struct Parser {
@@ -127,6 +133,14 @@ impl Parser {
                     "list item where a mapping pair was expected",
                 ));
             }
+            if l.is_dict_marker() {
+                return Err(error(
+                    ErrorKind::BadDictMarker,
+                    l.no,
+                    l.indent + 1,
+                    "dict entry where a mapping pair was expected",
+                ));
+            }
             let (path, value) = self.parse_pair(indent, root, depth)?;
             insert_path(&mut map, &path, value, last_line_no(&self.lines, self.pos))?;
         }
@@ -188,6 +202,8 @@ impl Parser {
                     // levels below this pair's own depth slot.
                     if l.is_marker() {
                         Node::List(self.parse_items(child, depth + segs.len())?)
+                    } else if l.is_dict_marker() {
+                        Node::Dict(self.parse_entries(child, depth + segs.len())?)
                     } else {
                         Node::Map(self.parse_pairs(child, false, depth + segs.len())?)
                     }
@@ -280,6 +296,15 @@ impl Parser {
                 slot.indent += 2;
                 slot.rest = inner;
                 items.push(Node::List(self.parse_items(indent + 2, depth + 1)?));
+            } else if content == "=" || content.starts_with("= ") {
+                // Compact nested dict (`- = "k": v`): rewrite the line so
+                // the entry marker stands alone at indent + 2, then parse
+                // entries (spec §4 `'- ' entries`).
+                let inner = self.lines[self.pos].rest[2..].to_string();
+                let slot = &mut self.lines[self.pos];
+                slot.indent += 2;
+                slot.rest = inner;
+                items.push(Node::Dict(self.parse_entries(indent + 2, depth + 1)?));
             } else if content == "\"\"\"" {
                 // Triple-quoted string as a list item (spec §5): content
                 // lines and closer both sit two columns past the marker.
@@ -351,9 +376,205 @@ impl Parser {
         }
         if l.is_marker() {
             Ok(Node::List(self.parse_items(child, depth + 1)?))
+        } else if l.is_dict_marker() {
+            Ok(Node::Dict(self.parse_entries(child, depth + 1)?))
         } else {
             Ok(Node::Map(self.parse_pairs(child, false, depth + 1)?))
         }
+    }
+
+    /// Parses consecutive dict entries (`= "k": value`) whose markers
+    /// start at `indent` (spec §4 `entries`).
+    fn parse_entries(&mut self, indent: usize, depth: usize) -> Result<Map> {
+        let mut map = Map::new();
+        loop {
+            self.skip_insignificant();
+            let l = match self.peek() {
+                None => break,
+                Some(l) => l,
+            };
+            if l.indent < indent {
+                break;
+            }
+            if l.indent > indent {
+                return Err(error(
+                    ErrorKind::BadIndent,
+                    l.no,
+                    l.indent + 1,
+                    format!("expected dict entries at column {}", indent + 1),
+                ));
+            }
+            let stripped = l.stripped().to_string();
+            if !(stripped == "=" || stripped.starts_with("= ")) {
+                break; // not an entry; the caller decides what comes next
+            }
+            let line_no = l.no;
+            // `=` alone at end of line is always an error: dict entries
+            // carry their key on the marker line (spec §4).
+            if stripped == "=" || stripped == "= " {
+                return Err(error(
+                    ErrorKind::BadDictMarker,
+                    line_no,
+                    indent + 1,
+                    "dict entry must carry its key on the marker line (`= \"k\": value`)",
+                ));
+            }
+            // `= content`: exactly one space after the equals.
+            if self.lines[self.pos].rest[2..].starts_with(' ') {
+                return Err(error(
+                    ErrorKind::BadDictMarker,
+                    line_no,
+                    indent + 3,
+                    "expected exactly one space after '='",
+                ));
+            }
+            let content = strip_comment(&self.lines[self.pos].rest[2..])
+                .trim_end()
+                .to_string();
+            if content.is_empty() {
+                return Err(error(
+                    ErrorKind::BadDictMarker,
+                    line_no,
+                    indent + 1,
+                    "dict entry must carry its key on the marker line (`= \"k\": value`)",
+                ));
+            }
+            self.pos += 1;
+            let (key, value) = self.parse_entry(&content, indent, line_no, depth)?;
+            if map.contains_key(&key) {
+                return Err(error(
+                    ErrorKind::DuplicateKey,
+                    line_no,
+                    1,
+                    format!("duplicate dict key `{key}`"),
+                ));
+            }
+            map.insert(key, value);
+        }
+        Ok(map)
+    }
+
+    /// Parses one dict entry body (the text after `= `): a quoted key, a
+    /// `:`, and a value. The value grammar mirrors [`Parser::parse_pair`]:
+    /// a scalar on the same line, a `"""` block, or an indented subtree.
+    fn parse_entry(
+        &mut self,
+        content: &str,
+        indent: usize,
+        line_no: usize,
+        depth: usize,
+    ) -> Result<(String, Node)> {
+        // Entry column: the `=` sits at `indent`, so the key starts two
+        // columns past it (mirrors the `- ` inline-pair keycol).
+        let keycol = indent + 2;
+        let base_col = indent + 3;
+        let (key, used) = match content.as_bytes().first() {
+            Some(b'"') | Some(b'\'') => {
+                scan_quoted_segment(content, line_no, base_col).map_err(|e| {
+                    if e.kind == ErrorKind::Unterminated {
+                        e
+                    } else {
+                        error(
+                            ErrorKind::BadDictMarker,
+                            line_no,
+                            base_col,
+                            format!("invalid dict key: {}", e.message),
+                        )
+                    }
+                })?
+            }
+            _ => {
+                return Err(error(
+                    ErrorKind::BadDictMarker,
+                    line_no,
+                    base_col,
+                    "dict key must be quoted (`= \"k\": value`)",
+                ));
+            }
+        };
+        if key.is_empty() {
+            return Err(error(
+                ErrorKind::BadDictMarker,
+                line_no,
+                base_col,
+                "empty dict key",
+            ));
+        }
+        let rest = &content[used..];
+        let Some(after_colon) = rest.strip_prefix(':') else {
+            return Err(error(
+                ErrorKind::BadDictMarker,
+                line_no,
+                base_col + content[..used].chars().count(),
+                "expected ':' after dict key",
+            ));
+        };
+        let value_col = base_col + content[..used].chars().count() + 1;
+        let value = if after_colon.is_empty() {
+            // `= "k":` — the value is an indented subtree below, sitting
+            // two columns past the `=` marker (like a bare `-` item's
+            // content), e.g. `= "team-a":` then `- "amy"` at marker + 2.
+            self.skip_insignificant();
+            match self.peek() {
+                None => return Err(missing_value(line_no, indent)),
+                Some(l) if l.indent <= indent => return Err(missing_value(line_no, indent)),
+                Some(l) => {
+                    let child = l.indent;
+                    if child != indent + 2 {
+                        return Err(error(
+                            ErrorKind::BadIndent,
+                            l.no,
+                            child + 1,
+                            format!("subtree must be indented to column {}", indent + 3),
+                        ));
+                    }
+                    if depth + 1 > crate::MAX_DEPTH {
+                        return Err(error(
+                            ErrorKind::DepthLimit,
+                            l.no,
+                            child + 1,
+                            format!("nesting exceeds the maximum depth of {}", crate::MAX_DEPTH),
+                        ));
+                    }
+                    if l.is_marker() {
+                        Node::List(self.parse_items(child, depth + 1)?)
+                    } else if l.is_dict_marker() {
+                        Node::Dict(self.parse_entries(child, depth + 1)?)
+                    } else {
+                        Node::Map(self.parse_pairs(child, false, depth + 1)?)
+                    }
+                }
+            }
+        } else if let Some(v) = after_colon.strip_prefix(' ') {
+            if v.starts_with(' ') {
+                return Err(error(
+                    ErrorKind::UnexpectedCharacter,
+                    line_no,
+                    value_col + 1,
+                    "expected exactly one space after ':'",
+                ));
+            }
+            match v {
+                "\"\"\"" => Node::Scalar(self.read_triple(keycol)?),
+                _ if v.starts_with("\"\"\"") => {
+                    return Err(error(
+                        ErrorKind::UnexpectedCharacter,
+                        line_no,
+                        value_col + 1,
+                        "triple-quoted string must start on its own line",
+                    ));
+                }
+                _ => self.scalar_from_token(v, line_no, value_col + 1)?,
+            }
+        } else {
+            return Err(error(
+                ErrorKind::UnexpectedCharacter,
+                line_no,
+                value_col,
+                "expected exactly one space after ':'",
+            ));
+        };
+        Ok((key, value))
     }
 
     /// Reads a `"""` block whose key line has been consumed. Content is
@@ -874,7 +1095,12 @@ mod tests {
         let mut segs = path.split('.').peekable();
         let mut cur = doc(text).get(segs.next().unwrap()).expect("key").clone();
         for seg in segs {
-            cur = cur.as_map().expect("map").get(seg).expect("key").clone();
+            cur = cur
+                .as_keyed()
+                .expect("keyed")
+                .get(seg)
+                .expect("key")
+                .clone();
         }
         cur.as_scalar().expect("scalar").text.clone()
     }
@@ -883,7 +1109,12 @@ mod tests {
         let mut segs = path.split('.').peekable();
         let mut cur = doc(text).get(segs.next().unwrap()).expect("key").clone();
         for seg in segs {
-            cur = cur.as_map().expect("map").get(seg).expect("key").clone();
+            cur = cur
+                .as_keyed()
+                .expect("keyed")
+                .get(seg)
+                .expect("key")
+                .clone();
         }
         cur.as_scalar().expect("scalar").shape
     }
@@ -1406,5 +1637,144 @@ b: \"\"\"
         let child: Vec<String> = (0..42).map(|i| format!("m{i}")).collect();
         let t = format!("{}:\n  {}: 0\n", parent.join("."), child.join("."));
         assert_eq!(err(&t).kind, DepthLimit);
+    }
+
+    // ---- dicts ----
+
+    #[test]
+    fn dict_of_scalars() {
+        let t = "metrics:\n  = \"a.b.c/name\": 99.9\n  = \"errors/total\": 3\n";
+        let d = doc(t);
+        let dict = d.get("metrics").unwrap().as_dict().expect("dict");
+        assert_eq!(dict.len(), 2);
+        // Dict keys are opaque: dots never split.
+        assert_eq!(
+            dict.get("a.b.c/name").unwrap().as_scalar().unwrap().text,
+            "99.9"
+        );
+        assert_eq!(
+            dict.get("errors/total").unwrap().as_scalar().unwrap().text,
+            "3"
+        );
+        // A dict is not a map.
+        assert!(d.get("metrics").unwrap().as_map().is_none());
+    }
+
+    #[test]
+    fn dict_keys_must_be_quoted() {
+        assert_eq!(err("m:\n  = k: 1\n").kind, BadDictMarker);
+        assert_eq!(err("m:\n  = \"k\" 1\n").kind, BadDictMarker);
+    }
+
+    #[test]
+    fn dict_marker_alone_is_an_error() {
+        assert_eq!(err("m:\n  =\n").kind, BadDictMarker);
+        assert_eq!(err("m:\n  = \n").kind, BadDictMarker);
+        assert_eq!(err("= \"k\": 1\n").kind, BadDictMarker);
+    }
+
+    #[test]
+    fn dict_exactly_one_space() {
+        assert_eq!(err("m:\n  =  \"k\": 1\n").kind, BadDictMarker);
+        assert_eq!(err("m:\n  = \"k\":1\n").kind, UnexpectedCharacter);
+        assert_eq!(err("m:\n  = \"k\":  1\n").kind, UnexpectedCharacter);
+    }
+
+    #[test]
+    fn dict_duplicate_keys() {
+        assert_eq!(err("m:\n  = \"k\": 1\n  = \"k\": 2\n").kind, DuplicateKey);
+    }
+
+    #[test]
+    fn dict_value_subtrees() {
+        // List value hangs off the marker (marker + 2).
+        let t = "groups:\n  = \"team-a\":\n    - \"amy\"\n    - \"bo\"\n";
+        let items = doc(t)
+            .get("groups")
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get("team-a")
+            .unwrap()
+            .as_list()
+            .unwrap()
+            .to_vec();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].as_scalar().unwrap().text, "amy");
+        // Nested dict value.
+        let t2 = "outer:\n  = \"a\":\n    = \"b\": 1\n    = \"c\": 2\n";
+        let d2 = doc(t2);
+        let inner = d2
+            .get("outer")
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get("a")
+            .unwrap()
+            .as_dict()
+            .unwrap();
+        assert_eq!(inner.get("b").unwrap().as_scalar().unwrap().text, "1");
+        // Node-prefix value.
+        let t3 = "m:\n  = \"k\":\n    a: 1\n";
+        assert_eq!(scalar_text(t3, "m.k.a"), "1");
+    }
+
+    #[test]
+    fn dict_triple_value() {
+        let t = "m:\n  = \"k\": \"\"\"\n      line\n    \"\"\"\n";
+        assert_eq!(
+            doc(t)
+                .get("m")
+                .unwrap()
+                .as_dict()
+                .unwrap()
+                .get("k")
+                .unwrap()
+                .as_scalar()
+                .unwrap()
+                .text,
+            "line\n"
+        );
+    }
+
+    #[test]
+    fn dict_in_list_items() {
+        // First entry inlined after `-`; the rest align to its column.
+        let t = "items:\n  - = \"a.b/c\": 1\n    = \"d\": 2\n  - = \"a.b/c\": 3\n    = \"d\": 4\n";
+        let items = doc(t).get("items").unwrap().as_list().unwrap().to_vec();
+        assert_eq!(items.len(), 2);
+        let first = items[0].as_dict().unwrap();
+        assert_eq!(first.get("a.b/c").unwrap().as_scalar().unwrap().text, "1");
+        assert_eq!(first.get("d").unwrap().as_scalar().unwrap().text, "2");
+        // Compact nested dict under a bare marker.
+        let t2 = "m:\n  - = \"k\": 1\n";
+        assert_eq!(
+            doc(t2).get("m").unwrap().as_list().unwrap()[0]
+                .as_dict()
+                .unwrap()
+                .get("k")
+                .unwrap()
+                .as_scalar()
+                .unwrap()
+                .text,
+            "1"
+        );
+    }
+
+    #[test]
+    fn dict_round_trip_canonical() {
+        let cases = [
+            "metrics:\n  = \"a.b.c/name\": 99.9\n  = \"errors/total\": 3\n",
+            "groups:\n  = \"team-a\":\n    - \"amy\"\n    - \"bo\"\n",
+            "outer:\n  = \"a\":\n    = \"b\": 1\n    = \"c\": 2\n",
+            "items:\n  - = \"a.b/c\": 1\n    = \"d\": 2\n",
+            "m:\n  = \"k\": \"\"\"\n      line\n    \"\"\"\n",
+            "m:\n  = \"k\": {}\n  = \"j\": []\n",
+        ];
+        for text in cases {
+            let node = from_str(text).expect("parse");
+            let out = crate::serialize::to_string(&node).expect("serialize");
+            assert_eq!(out, text, "round-trip failed for {text:?}");
+        }
     }
 }

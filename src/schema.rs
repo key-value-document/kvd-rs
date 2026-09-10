@@ -3,7 +3,7 @@
 //! The parser is registry-free; this module checks a data [`Node`] against
 //! a schema. A standalone schema document is ordinary KVD whose values are
 //! builtin scalar type names (`int`, `float`, `bool`, `str`), container type
-//! names (`list`, `map`) inside a `type:` descriptor, or the `{}` / `[]`
+//! names (`list`, `dict`) inside a `type:` descriptor, or the `{}` / `[]`
 //! literals — a bare tree mirroring the data's structure, with no
 //! metakeys (`__schema__` belongs in data documents only, spec §4). A
 //! one-item list declares the element type for every item of the
@@ -80,7 +80,7 @@ pub enum VerifyError {
     /// Everything parsed; verification reported these document violations.
     Violations(Vec<Violation>),
     /// Everything parsed, but the schema itself is malformed (e.g. a quoted or
-    /// numbered type leaf, a bare `list`/`map` leaf, a descriptor missing its
+    /// numbered type leaf, a bare `list`/`dict` leaf, a descriptor missing its
     /// `type`, or an unknown type name). A malformed schema cannot be used to
     /// check a document, so no document violations are reported (spec §8.3).
     SchemaMalformed(Vec<Violation>),
@@ -117,7 +117,7 @@ enum Builtin {
     Bool,
     Str,
     List,
-    Map,
+    Dict,
 }
 
 fn builtin(name: &str) -> Option<Builtin> {
@@ -127,7 +127,7 @@ fn builtin(name: &str) -> Option<Builtin> {
         "bool" => Some(Builtin::Bool),
         "str" => Some(Builtin::Str),
         "list" => Some(Builtin::List),
-        "map" => Some(Builtin::Map),
+        "dict" => Some(Builtin::Dict),
         _ => None,
     }
 }
@@ -184,9 +184,9 @@ pub fn verify_from_str(doc: &str, schema: &str) -> Result<(), VerifyError> {
 fn validate_schema(schema: &Node, path: &str, out: &mut Vec<Violation>) {
     match schema {
         Node::Scalar(_) => match descriptor(schema) {
-            Some((name, _)) if name == "list" || name == "map" => out.push(Violation::new(
+            Some((name, _)) if name == "list" || name == "dict" => out.push(Violation::new(
                 path,
-                "`list`/`map` may only appear in a descriptor (`type: list` / `type: map`)",
+                "`list`/`dict` may only appear in a descriptor (`type: list` / `type: dict`)",
             )),
             Some((name, _)) if builtin(&name).is_none() => {
                 out.push(Violation::new(path, format!("unknown type `{name}`")))
@@ -199,7 +199,7 @@ fn validate_schema(schema: &Node, path: &str, out: &mut Vec<Violation>) {
         },
         Node::Map(m) => {
             if m.is_empty() {
-                return; // `{}` leaf: any map, well-formed.
+                return; // `{}` leaf: any dict, well-formed.
             }
             if let Some((name, _)) = descriptor(schema) {
                 // Descriptor leaf.
@@ -213,6 +213,23 @@ fn validate_schema(schema: &Node, path: &str, out: &mut Vec<Violation>) {
             for (k, sub) in m.iter() {
                 validate_schema(sub, &join(path, k), out);
             }
+        }
+        Node::Dict(m) => {
+            // Single-entry dict form (spec §5): exactly one entry whose
+            // value declares the uniform value type. The example key is a
+            // placeholder; any dict key matches.
+            if m.len() != 1 {
+                out.push(Violation::new(
+                    path,
+                    format!(
+                        "schema dict must declare exactly one entry type, found {}",
+                        m.len()
+                    ),
+                ));
+                return;
+            }
+            let (_, sub) = &m.entries()[0];
+            validate_schema(sub, &format!("{path}[\"example\"]"), out);
         }
         Node::List(items) => {
             if items.is_empty() {
@@ -241,7 +258,7 @@ fn validate_descriptor_schema(m: &Map, type_name: &str, path: &str, out: &mut Ve
         return;
     }
     // Check for unexpected keys at descriptor level.
-    let allowed_descriptor_keys: &[&str] = if type_name == "list" {
+    let allowed_descriptor_keys: &[&str] = if type_name == "list" || type_name == "dict" {
         &["type", "optional", "validation", "element"]
     } else {
         &["type", "optional", "validation"]
@@ -250,7 +267,10 @@ fn validate_descriptor_schema(m: &Map, type_name: &str, path: &str, out: &mut Ve
         if !allowed_descriptor_keys.contains(&k) {
             out.push(Violation::new(
                 join(path, k),
-                format!("unknown key `{k}` in descriptor (expected one of {})", allowed_descriptor_keys.join(", ")),
+                format!(
+                    "unknown key `{k}` in descriptor (expected one of {})",
+                    allowed_descriptor_keys.join(", ")
+                ),
             ));
         }
     }
@@ -264,7 +284,7 @@ fn validate_descriptor_schema(m: &Map, type_name: &str, path: &str, out: &mut Ve
             )),
         }
     }
-    // Validate `element` for list, ensure present and recursively valid.
+    // Validate `element` for list/dict, ensure present and recursively valid.
     if type_name == "list" {
         match m.get("element") {
             None => {
@@ -272,11 +292,18 @@ fn validate_descriptor_schema(m: &Map, type_name: &str, path: &str, out: &mut Ve
             }
             Some(e) => validate_schema(e, &join(path, "element"), out),
         }
+    } else if type_name == "dict" {
+        // `element` is optional for dict (spec §5: a `type: dict`
+        // descriptor accepts any dict); when present it is validated and
+        // enforced as the uniform value type.
+        if let Some(e) = m.get("element") {
+            validate_schema(e, &join(path, "element"), out);
+        }
     } else if m.get("element").is_some() {
-        // `element` only for list
+        // `element` only for list/dict
         out.push(Violation::new(
             join(path, "element"),
-            "`element` is only valid for `type: list`",
+            "`element` is only valid for `type: list` / `type: dict`",
         ));
     }
 
@@ -289,7 +316,7 @@ fn validate_descriptor_schema(m: &Map, type_name: &str, path: &str, out: &mut Ve
             None => {
                 out.push(Violation::new(
                     join(path, "validation"),
-                    "`validation` must be a map",
+                    "`validation` must be a dict",
                 ));
             }
         }
@@ -302,7 +329,7 @@ fn validate_validation_block(vmap: &Map, type_name: &str, path: &str, out: &mut 
     let allowed: &[&str] = match builtin {
         Builtin::Int | Builtin::Float => &["min", "max", "exclusive_min", "exclusive_max"],
         Builtin::Str => &["min_len", "max_len", "pattern"],
-        Builtin::List | Builtin::Map => &["min_len", "max_len"],
+        Builtin::List | Builtin::Dict => &["min_len", "max_len"],
         Builtin::Bool => &[],
     };
     for (k, v) in vmap.iter() {
@@ -326,7 +353,10 @@ fn validate_validation_block(vmap: &Map, type_name: &str, path: &str, out: &mut 
                                 join(path, k),
                                 format!("constraint `{k}` for `int` must be an int"),
                             ));
-                        } else if builtin == Builtin::Float && s.shape != Shape::Int && s.shape != Shape::Float {
+                        } else if builtin == Builtin::Float
+                            && s.shape != Shape::Int
+                            && s.shape != Shape::Float
+                        {
                             out.push(Violation::new(
                                 join(path, k),
                                 format!("constraint `{k}` for `float` must be a number"),
@@ -338,7 +368,10 @@ fn validate_validation_block(vmap: &Map, type_name: &str, path: &str, out: &mut 
                             if s.text.parse::<f64>().is_err() {
                                 out.push(Violation::new(
                                     join(path, k),
-                                    format!("invalid float value `{}` for constraint `{k}`", s.text),
+                                    format!(
+                                        "invalid float value `{}` for constraint `{k}`",
+                                        s.text
+                                    ),
                                 ));
                             }
                         } else if s.shape == Shape::Int {
@@ -353,7 +386,10 @@ fn validate_validation_block(vmap: &Map, type_name: &str, path: &str, out: &mut 
                                 if tight.parse::<i128>().is_err() && !is_big_int(&tight) {
                                     out.push(Violation::new(
                                         join(path, k),
-                                        format!("invalid int value `{}` for constraint `{k}`", s.text),
+                                        format!(
+                                            "invalid int value `{}` for constraint `{k}`",
+                                            s.text
+                                        ),
                                     ));
                                 }
                             }
@@ -365,28 +401,26 @@ fn validate_validation_block(vmap: &Map, type_name: &str, path: &str, out: &mut 
                     )),
                 }
             }
-            "min_len" | "max_len" => {
-                match v.as_scalar() {
-                    Some(s) if s.shape == Shape::Int => {
-                        let clean = s.text.replace('_', "");
-                        match clean.parse::<i64>() {
-                            Ok(n) if n >= 0 => {}
-                            Ok(_) => out.push(Violation::new(
-                                join(path, k),
-                                format!("constraint `{k}` must be a non-negative int"),
-                            )),
-                            Err(_) => out.push(Violation::new(
-                                join(path, k),
-                                format!("constraint `{k}` must be a non-negative int"),
-                            )),
-                        }
+            "min_len" | "max_len" => match v.as_scalar() {
+                Some(s) if s.shape == Shape::Int => {
+                    let clean = s.text.replace('_', "");
+                    match clean.parse::<i64>() {
+                        Ok(n) if n >= 0 => {}
+                        Ok(_) => out.push(Violation::new(
+                            join(path, k),
+                            format!("constraint `{k}` must be a non-negative int"),
+                        )),
+                        Err(_) => out.push(Violation::new(
+                            join(path, k),
+                            format!("constraint `{k}` must be a non-negative int"),
+                        )),
                     }
-                    _ => out.push(Violation::new(
-                        join(path, k),
-                        format!("constraint `{k}` must be a non-negative int"),
-                    )),
                 }
-            }
+                _ => out.push(Violation::new(
+                    join(path, k),
+                    format!("constraint `{k}` must be a non-negative int"),
+                )),
+            },
             "pattern" => {
                 match v.as_scalar() {
                     Some(s) if s.shape == Shape::Str => {
@@ -515,8 +549,8 @@ fn descriptor(schema: &Node) -> Option<(String, bool)> {
 /// Validates `data` against a schema leaf descriptor (spec §5, §10).
 ///
 /// A descriptor is a map carrying a `type` key. Container types `list` and
-/// `map` may carry `optional` and are dispatched to [`check_list`] /
-/// [`check_map`]; scalar types defer to [`check_shape`] followed by constraint
+/// `dict` may carry `optional` and are dispatched to [`check_list`] /
+/// [`check_dict`]; scalar types defer to [`check_shape`] followed by constraint
 /// checks.
 fn check_descriptor(schema: &Node, data: &Node, path: &str, out: &mut Vec<Violation>) {
     let Some((name, optional)) = descriptor(schema) else {
@@ -534,7 +568,7 @@ fn check_descriptor(schema: &Node, data: &Node, path: &str, out: &mut Vec<Violat
     }
     match name.as_str() {
         "list" => check_list(schema, data, path, out),
-        "map" => check_map(schema, data, path, out),
+        "dict" => check_dict(schema, data, path, out),
         _ => match builtin(&name) {
             Some(base) => {
                 let before = out.len();
@@ -561,7 +595,7 @@ fn check_list(schema: &Node, data: &Node, path: &str, out: &mut Vec<Violation>) 
         return;
     };
     // Length constraints first (spec §10).
-    check_validation_for_list_or_map(schema, data, Builtin::List, path, out);
+    check_validation_for_list_or_dict(schema, data, Builtin::List, path, out);
     let Some(element) = schema.as_map().and_then(|m| m.get("element")) else {
         out.push(Violation::new(path, "type: list requires an `element` key"));
         return;
@@ -571,18 +605,26 @@ fn check_list(schema: &Node, data: &Node, path: &str, out: &mut Vec<Violation>) 
     }
 }
 
-/// Verifies a `type: map` descriptor: `data` is a map (spec §5). Typed maps
-/// are written with the nested sub-schema form, so field contents are not
-/// checked here. Enforces length constraints.
-fn check_map(schema: &Node, data: &Node, path: &str, out: &mut Vec<Violation>) {
-    let Some(_) = data.as_map() else {
+/// Verifies a `type: dict` descriptor: `data` is a keyed collection (spec
+/// §5). Typed dicts use the single-entry form; contents are not checked
+/// here unless an `element` type is present. Enforces length constraints.
+fn check_dict(schema: &Node, data: &Node, path: &str, out: &mut Vec<Violation>) {
+    let Some(_) = data.as_keyed() else {
         out.push(Violation::new(
             path,
-            format!("expected a map, found {}", kind_of(data)),
+            format!("expected a dict, found {}", kind_of(data)),
         ));
         return;
     };
-    check_validation_for_list_or_map(schema, data, Builtin::Map, path, out);
+    check_validation_for_list_or_dict(schema, data, Builtin::Dict, path, out);
+    // A `type: dict` descriptor may carry an `element` type (spec §10);
+    // every dict value must match it. Without `element`, any dict passes.
+    if let Some(element) = schema.as_keyed().and_then(|m| m.get("element")) {
+        let Some(dm) = data.as_keyed() else { return };
+        for (k, v) in dm.iter() {
+            check(element, v, &join(path, k), out);
+        }
+    }
 }
 
 /// Recursively checks `data` against `schema`, appending violations.
@@ -590,11 +632,11 @@ fn check(schema: &Node, data: &Node, path: &str, out: &mut Vec<Violation>) {
     match schema {
         Node::Map(m) => {
             if m.is_empty() {
-                // `{}` leaf: any map, contents unchecked.
-                if data.as_map().is_none() {
+                // `{}` leaf: any keyed collection, contents unchecked.
+                if data.as_keyed().is_none() {
                     out.push(Violation::new(
                         path,
-                        format!("expected a map, found {}", kind_of(data)),
+                        format!("expected a dict, found {}", kind_of(data)),
                     ));
                 }
                 return;
@@ -631,6 +673,31 @@ fn check(schema: &Node, data: &Node, path: &str, out: &mut Vec<Violation>) {
                     }
                     Some(dsub) => check(sub, dsub, &join(path, k), out),
                 }
+            }
+        }
+        Node::Dict(m) => {
+            // Single-entry dict form (spec §5): the data value must be a
+            // dict and every value must match the single entry type.
+            if m.len() != 1 {
+                out.push(Violation::new(
+                    path,
+                    format!(
+                        "schema dict must declare exactly one entry type, found {}",
+                        m.len()
+                    ),
+                ));
+                return;
+            }
+            let Some(dm) = data.as_dict() else {
+                out.push(Violation::new(
+                    path,
+                    format!("expected a dict, found {}", kind_of(data)),
+                ));
+                return;
+            };
+            let (_, element) = &m.entries()[0];
+            for (k, v) in dm.iter() {
+                check(element, v, &join(path, k), out);
             }
         }
         Node::List(items) => {
@@ -673,10 +740,10 @@ fn check(schema: &Node, data: &Node, path: &str, out: &mut Vec<Violation>) {
                 ));
                 return;
             };
-            if name == "list" || name == "map" {
+            if name == "list" || name == "dict" {
                 out.push(Violation::new(
                     path,
-                    "`list`/`map` may only appear in a descriptor (`type: list` / `type: map`)",
+                    "`list`/`dict` may only appear in a descriptor (`type: list` / `type: dict`)",
                 ));
                 return;
             }
@@ -692,8 +759,8 @@ fn check_shape(base: Builtin, data: &Node, path: &str, out: &mut Vec<Violation>)
         Builtin::Float => "float",
         Builtin::Bool => "bool",
         Builtin::Str => "string",
-        Builtin::List | Builtin::Map => {
-            unreachable!("container shapes handled by check_list/check_map")
+        Builtin::List | Builtin::Dict => {
+            unreachable!("container shapes handled by check_list/check_dict")
         }
     };
     let Some(s) = data.as_scalar() else {
@@ -708,8 +775,8 @@ fn check_shape(base: Builtin, data: &Node, path: &str, out: &mut Vec<Violation>)
         Builtin::Float => s.shape == Shape::Float,
         Builtin::Bool => s.shape == Shape::Bool,
         Builtin::Str => s.shape == Shape::Str,
-        Builtin::List | Builtin::Map => {
-            unreachable!("container shapes handled by check_list/check_map")
+        Builtin::List | Builtin::Dict => {
+            unreachable!("container shapes handled by check_list/check_dict")
         }
     };
     if !ok {
@@ -723,7 +790,7 @@ fn check_shape(base: Builtin, data: &Node, path: &str, out: &mut Vec<Violation>)
 // Validation constraint enforcement (spec §10)
 //
 // String length is Unicode scalar count (`chars().count()`), not bytes;
-// `list`/`map` length is element/key count. This matches the spec table
+// `list`/`dict` length is element/entry count. This matches the spec table
 // “string length ≥ min_len” and “collection length (key count)”.
 
 fn check_validation_for_scalar(
@@ -733,7 +800,9 @@ fn check_validation_for_scalar(
     path: &str,
     out: &mut Vec<Violation>,
 ) {
-    let Some(s) = data.as_scalar() else { return; };
+    let Some(s) = data.as_scalar() else {
+        return;
+    };
     let Some(vmap) = schema
         .as_map()
         .and_then(|m| m.get("validation"))
@@ -910,7 +979,7 @@ fn check_validation_for_scalar(
     }
 }
 
-fn check_validation_for_list_or_map(
+fn check_validation_for_list_or_dict(
     schema: &Node,
     data: &Node,
     builtin: Builtin,
@@ -926,7 +995,7 @@ fn check_validation_for_list_or_map(
     };
     let len: i64 = match builtin {
         Builtin::List => data.as_list().map(|l| l.len() as i64).unwrap_or(0),
-        Builtin::Map => data.as_map().map(|m| m.len() as i64).unwrap_or(0),
+        Builtin::Dict => data.as_keyed().map(|m| m.len() as i64).unwrap_or(0),
         _ => return,
     };
     for (k, v) in vmap.iter() {
@@ -990,11 +1059,7 @@ fn split_sign(s: &str) -> (bool, &str) {
 
 fn normalize_digits(s: &str) -> &str {
     let trimmed = s.trim_start_matches('0');
-    if trimmed.is_empty() {
-        "0"
-    } else {
-        trimmed
-    }
+    if trimmed.is_empty() { "0" } else { trimmed }
 }
 
 fn cmp_abs(a: &str, b: &str) -> core::cmp::Ordering {
@@ -1023,6 +1088,7 @@ fn kind_of(node: &Node) -> &'static str {
     match node {
         Node::Scalar(_) => "a scalar",
         Node::Map(_) => "a map",
+        Node::Dict(_) => "a dict",
         Node::List(_) => "a list",
     }
 }
@@ -1084,7 +1150,7 @@ mod tests {
     }
 
     #[test]
-    fn scalar_where_map_expected() {
+    fn scalar_where_dict_expected() {
         assert_eq!(
             errs("a: 1\n", "a:\n  b: int\n"),
             vec![Violation::new("a", "expected a map, found a scalar")]
@@ -1142,7 +1208,7 @@ mod tests {
     }
 
     #[test]
-    fn null_where_map_or_list_expected_is_an_error() {
+    fn null_where_dict_or_list_expected_is_an_error() {
         let v = errs("a: null\n", "a:\n  b: int\n");
         assert_eq!(v.len(), 1);
         assert!(
@@ -1161,13 +1227,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_map_leaf_accepts_any_map() {
+    fn empty_dict_leaf_accepts_any_dict() {
         ok("a: {}\n", "a: {}\n");
         ok("a:\n  x: 1\n  y:\n    z: \"deep\"\n", "a: {}\n");
         // ...but not a non-map.
         assert_eq!(
             errs("a: []\n", "a: {}\n"),
-            vec![Violation::new("a", "expected a map, found a list")]
+            vec![Violation::new("a", "expected a dict, found a list")]
         );
     }
 
@@ -1194,7 +1260,7 @@ mod tests {
     }
 
     #[test]
-    fn list_of_maps_and_empty_literals() {
+    fn list_of_dicts_and_empty_literals() {
         ok(
             "eps:\n  - path: \"/a\"\n    port: 80\n  - path: \"/b\"\n    port: 443\n",
             "eps:\n  - path: str\n    port: int\n",
@@ -1232,11 +1298,62 @@ mod tests {
     }
 
     #[test]
-    fn type_map_descriptor_accepts_any_map() {
-        ok("cfg:\n  x: 1\n", "cfg:\n  type: map\n");
+    fn type_dict_descriptor_accepts_any_dict() {
+        ok("cfg:\n  x: 1\n", "cfg:\n  type: dict\n");
+        ok("cfg:\n  = \"k\": 1\n", "cfg:\n  type: dict\n");
         assert_eq!(
-            errs("cfg: 1\n", "cfg:\n  type: map\n"),
-            vec![Violation::new("cfg", "expected a map, found a scalar")]
+            errs("cfg: 1\n", "cfg:\n  type: dict\n"),
+            vec![Violation::new("cfg", "expected a dict, found a scalar")]
+        );
+    }
+
+    #[test]
+    fn single_entry_dict_checks_every_value() {
+        ok(
+            "metrics:\n  = \"a\": 1.5\n  = \"b\": 2.5\n",
+            "metrics:\n  = \"example\": float\n",
+        );
+        assert_eq!(
+            errs(
+                "metrics:\n  = \"a\": 1.5\n  = \"b\": \"x\"\n",
+                "metrics:\n  = \"example\": float\n",
+            ),
+            vec![Violation::new("metrics.b", "expected float, found string")]
+        );
+        // Data must be a dict, not node prefixes.
+        assert_eq!(
+            errs("m:\n  a: 1\n", "m:\n  = \"example\": int\n"),
+            vec![Violation::new("m", "expected a dict, found a map")]
+        );
+        // Nested value types.
+        ok(
+            "groups:\n  = \"team-a\":\n    - \"amy\"\n",
+            "groups:\n  = \"example\":\n    - str\n",
+        );
+    }
+
+    #[test]
+    fn schema_dict_must_declare_one_entry() {
+        let s = deserialize::from_str("m:\n  = \"a\": int\n  = \"b\": str\n").unwrap();
+        let d = deserialize::from_str("m:\n  = \"a\": 1\n").unwrap();
+        assert_eq!(
+            verify(&d, &s).unwrap_err(),
+            VerifyError::SchemaMalformed(vec![Violation::new(
+                "m",
+                "schema dict must declare exactly one entry type, found 2"
+            )])
+        );
+    }
+
+    #[test]
+    fn dict_element_descriptor_checks_values() {
+        ok("m:\n  = \"a\": 1\n", "m:\n  type: dict\n  element: int\n");
+        assert_eq!(
+            errs(
+                "m:\n  = \"a\": \"x\"\n",
+                "m:\n  type: dict\n  element: int\n",
+            ),
+            vec![Violation::new("m.a", "expected int, found string")]
         );
     }
 
@@ -1264,23 +1381,23 @@ mod tests {
             )]
         );
         // Optional map.
-        ok("cfg: null\n", "cfg:\n  type: map\n  optional: true\n");
+        ok("cfg: null\n", "cfg:\n  type: dict\n  optional: true\n");
     }
 
     #[test]
-    fn bare_list_map_leaf_is_an_error() {
+    fn bare_list_dict_leaf_is_an_error() {
         assert_eq!(
             errs("a: 1\n", "a: list\n"),
             vec![Violation::new(
                 "a",
-                "`list`/`map` may only appear in a descriptor (`type: list` / `type: map`)"
+                "`list`/`dict` may only appear in a descriptor (`type: list` / `type: dict`)"
             )]
         );
         assert_eq!(
-            errs("a: {}\n", "a: map\n"),
+            errs("a: {}\n", "a: dict\n"),
             vec![Violation::new(
                 "a",
-                "`list`/`map` may only appear in a descriptor (`type: list` / `type: map`)"
+                "`list`/`dict` may only appear in a descriptor (`type: list` / `type: dict`)"
             )]
         );
     }
@@ -1442,45 +1559,74 @@ mod tests {
     // §10 Validation constraints
     #[test]
     fn int_validation_ranges() {
-        ok("a: 5\n", "a:\n  type: int\n  validation:\n    min: 0\n    max: 10\n");
-        assert!(errs("a: -1\n", "a:\n  type: int\n  validation:\n    min: 0\n")[0]
-            .message
-            .contains("less than min"));
-        assert!(errs("a: 11\n", "a:\n  type: int\n  validation:\n    max: 10\n")[0]
-            .message
-            .contains("exceeds max"));
+        ok(
+            "a: 5\n",
+            "a:\n  type: int\n  validation:\n    min: 0\n    max: 10\n",
+        );
+        assert!(
+            errs("a: -1\n", "a:\n  type: int\n  validation:\n    min: 0\n")[0]
+                .message
+                .contains("less than min")
+        );
+        assert!(
+            errs("a: 11\n", "a:\n  type: int\n  validation:\n    max: 10\n")[0]
+                .message
+                .contains("exceeds max")
+        );
         ok(
             "a: 5\n",
             "a:\n  type: int\n  validation:\n    exclusive_min: 4\n    exclusive_max: 6\n",
         );
-        assert!(errs("a: 4\n", "a:\n  type: int\n  validation:\n    exclusive_min: 4\n")[0]
+        assert!(
+            errs(
+                "a: 4\n",
+                "a:\n  type: int\n  validation:\n    exclusive_min: 4\n"
+            )[0]
             .message
-            .contains("greater than exclusive_min"));
-        assert!(errs("a: 6\n", "a:\n  type: int\n  validation:\n    exclusive_max: 6\n")[0]
+            .contains("greater than exclusive_min")
+        );
+        assert!(
+            errs(
+                "a: 6\n",
+                "a:\n  type: int\n  validation:\n    exclusive_max: 6\n"
+            )[0]
             .message
-            .contains("less than exclusive_max"));
+            .contains("less than exclusive_max")
+        );
         // underscore and big-int
-        ok("a: 1_000\n", "a:\n  type: int\n  validation:\n    min: 999\n");
-        assert!(errs("a: 1_000\n", "a:\n  type: int\n  validation:\n    max: 999\n")[0]
+        ok(
+            "a: 1_000\n",
+            "a:\n  type: int\n  validation:\n    min: 999\n",
+        );
+        assert!(
+            errs(
+                "a: 1_000\n",
+                "a:\n  type: int\n  validation:\n    max: 999\n"
+            )[0]
             .message
-            .contains("exceeds max"));
+            .contains("exceeds max")
+        );
         ok(
             "a: 99999999999999999999\n",
             "a:\n  type: int\n  validation:\n    min: 99999999999999999998\n",
         );
-        assert!(errs(
-            "a: 99999999999999999999\n",
-            "a:\n  type: int\n  validation:\n    max: 99999999999999999998\n"
-        )[0]
+        assert!(
+            errs(
+                "a: 99999999999999999999\n",
+                "a:\n  type: int\n  validation:\n    max: 99999999999999999998\n"
+            )[0]
             .message
-            .contains("exceeds max"));
+            .contains("exceeds max")
+        );
         ok(
             "a: -5\n",
             "a:\n  type: int\n  validation:\n    min: -10\n    max: 0\n",
         );
-        assert!(errs("a: -15\n", "a:\n  type: int\n  validation:\n    min: -10\n")[0]
-            .message
-            .contains("less than min"));
+        assert!(
+            errs("a: -15\n", "a:\n  type: int\n  validation:\n    min: -10\n")[0]
+                .message
+                .contains("less than min")
+        );
     }
 
     #[test]
@@ -1489,19 +1635,34 @@ mod tests {
             "a: 1.5\n",
             "a:\n  type: float\n  validation:\n    min: 0.5\n    max: 2.5\n",
         );
-        assert!(errs("a: 0.4\n", "a:\n  type: float\n  validation:\n    min: 0.5\n")[0]
+        assert!(
+            errs(
+                "a: 0.4\n",
+                "a:\n  type: float\n  validation:\n    min: 0.5\n"
+            )[0]
             .message
-            .contains("less than min"));
-        assert!(errs("a: 3.0\n", "a:\n  type: float\n  validation:\n    max: 2.5\n")[0]
+            .contains("less than min")
+        );
+        assert!(
+            errs(
+                "a: 3.0\n",
+                "a:\n  type: float\n  validation:\n    max: 2.5\n"
+            )[0]
             .message
-            .contains("exceeds max"));
+            .contains("exceeds max")
+        );
         ok(
             "a: 1.0\n",
             "a:\n  type: float\n  validation:\n    exclusive_min: 0.5\n    exclusive_max: 1.5\n",
         );
-        assert!(errs("a: 0.5\n", "a:\n  type: float\n  validation:\n    exclusive_min: 0.5\n")[0]
+        assert!(
+            errs(
+                "a: 0.5\n",
+                "a:\n  type: float\n  validation:\n    exclusive_min: 0.5\n"
+            )[0]
             .message
-            .contains("greater than exclusive_min"));
+            .contains("greater than exclusive_min")
+        );
         // int-shaped bound on float is allowed
         ok("a: 1.5\n", "a:\n  type: float\n  validation:\n    min: 1\n");
     }
@@ -1512,38 +1673,57 @@ mod tests {
             "a: \"hello\"\n",
             "a:\n  type: str\n  validation:\n    min_len: 3\n    max_len: 10\n",
         );
-        assert!(errs("a: \"hi\"\n", "a:\n  type: str\n  validation:\n    min_len: 3\n")[0]
+        assert!(
+            errs(
+                "a: \"hi\"\n",
+                "a:\n  type: str\n  validation:\n    min_len: 3\n"
+            )[0]
             .message
-            .contains("less than min_len"));
-        assert!(errs(
-            "a: \"hello world long\"\n",
-            "a:\n  type: str\n  validation:\n    max_len: 5\n"
-        )[0]
+            .contains("less than min_len")
+        );
+        assert!(
+            errs(
+                "a: \"hello world long\"\n",
+                "a:\n  type: str\n  validation:\n    max_len: 5\n"
+            )[0]
             .message
-            .contains("exceeds max_len"));
+            .contains("exceeds max_len")
+        );
         // Unicode scalar count (é = 1 char, 2 bytes)
-        ok("a: \"é\"\n", "a:\n  type: str\n  validation:\n    min_len: 1\n    max_len: 1\n");
-        assert!(errs("a: \"é\"\n", "a:\n  type: str\n  validation:\n    max_len: 0\n")[0]
+        ok(
+            "a: \"é\"\n",
+            "a:\n  type: str\n  validation:\n    min_len: 1\n    max_len: 1\n",
+        );
+        assert!(
+            errs(
+                "a: \"é\"\n",
+                "a:\n  type: str\n  validation:\n    max_len: 0\n"
+            )[0]
             .message
-            .contains("exceeds max_len"));
+            .contains("exceeds max_len")
+        );
         // pattern full-match
         ok(
             "a: \"abc123\"\n",
             "a:\n  type: str\n  validation:\n    pattern: \"^[a-z]+[0-9]+$\"\n",
         );
-        assert!(errs(
-            "a: \"ABC\"\n",
-            "a:\n  type: str\n  validation:\n    pattern: \"^[a-z]+$\"\n"
-        )[0]
+        assert!(
+            errs(
+                "a: \"ABC\"\n",
+                "a:\n  type: str\n  validation:\n    pattern: \"^[a-z]+$\"\n"
+            )[0]
             .message
-            .contains("does not match pattern"));
+            .contains("does not match pattern")
+        );
         // "foo" must not match "foobar" (full-match)
-        assert!(errs(
-            "a: \"foobar\"\n",
-            "a:\n  type: str\n  validation:\n    pattern: \"foo\"\n"
-        )[0]
+        assert!(
+            errs(
+                "a: \"foobar\"\n",
+                "a:\n  type: str\n  validation:\n    pattern: \"foo\"\n"
+            )[0]
             .message
-            .contains("does not match pattern"));
+            .contains("does not match pattern")
+        );
         ok(
             "a: \"foo\"\n",
             "a:\n  type: str\n  validation:\n    pattern: \"foo\"\n",
@@ -1555,33 +1735,47 @@ mod tests {
     }
 
     #[test]
-    fn list_and_map_validation_lengths() {
+    fn list_and_dict_validation_lengths() {
         ok(
             "a:\n  - 1\n  - 2\n",
             "a:\n  type: list\n  element: int\n  validation:\n    min_len: 1\n    max_len: 3\n",
         );
-        assert!(errs("a: []\n", "a:\n  type: list\n  element: int\n  validation:\n    min_len: 1\n")[0]
+        assert!(
+            errs(
+                "a: []\n",
+                "a:\n  type: list\n  element: int\n  validation:\n    min_len: 1\n"
+            )[0]
             .message
-            .contains("less than min_len"));
-        assert!(errs(
-            "a:\n  - 1\n  - 2\n  - 3\n  - 4\n",
-            "a:\n  type: list\n  element: int\n  validation:\n    max_len: 3\n"
-        )[0]
+            .contains("less than min_len")
+        );
+        assert!(
+            errs(
+                "a:\n  - 1\n  - 2\n  - 3\n  - 4\n",
+                "a:\n  type: list\n  element: int\n  validation:\n    max_len: 3\n"
+            )[0]
             .message
-            .contains("exceeds max_len"));
+            .contains("exceeds max_len")
+        );
         ok(
             "a:\n  x: 1\n",
-            "a:\n  type: map\n  validation:\n    min_len: 1\n",
+            "a:\n  type: dict\n  validation:\n    min_len: 1\n",
         );
-        assert!(errs("a: {}\n", "a:\n  type: map\n  validation:\n    min_len: 1\n")[0]
+        assert!(
+            errs(
+                "a: {}\n",
+                "a:\n  type: dict\n  validation:\n    min_len: 1\n"
+            )[0]
             .message
-            .contains("less than min_len"));
-        assert!(errs(
-            "a:\n  x: 1\n  y: 2\n",
-            "a:\n  type: map\n  validation:\n    max_len: 1\n"
-        )[0]
+            .contains("less than min_len")
+        );
+        assert!(
+            errs(
+                "a:\n  x: 1\n  y: 2\n",
+                "a:\n  type: dict\n  validation:\n    max_len: 1\n"
+            )[0]
             .message
-            .contains("exceeds max_len"));
+            .contains("exceeds max_len")
+        );
     }
 
     #[test]
@@ -1596,10 +1790,13 @@ mod tests {
         );
         ok(
             "a: null\n",
-            "a:\n  type: map\n  optional: true\n  validation:\n    min_len: 1\n",
+            "a:\n  type: dict\n  optional: true\n  validation:\n    min_len: 1\n",
         );
         // absent optional with validation
-        ok("a: 1\n", "a: int\nb:\n  type: str\n  optional: true\n  validation:\n    min_len: 1\n");
+        ok(
+            "a: 1\n",
+            "a: int\nb:\n  type: str\n  optional: true\n  validation:\n    min_len: 1\n",
+        );
         // list element validation with null skipping
         ok(
             "a:\n  - 1\n  - null\n",
@@ -1623,12 +1820,14 @@ mod tests {
             "a:\n  - 5\n  - 6\n",
             "a:\n  type: list\n  element:\n    type: int\n    validation:\n      min: 0\n      max: 10\n",
         );
-        assert!(errs(
-            "a:\n  - 11\n",
-            "a:\n  type: list\n  element:\n    type: int\n    validation:\n      max: 10\n"
-        )[0]
+        assert!(
+            errs(
+                "a:\n  - 11\n",
+                "a:\n  type: list\n  element:\n    type: int\n    validation:\n      max: 10\n"
+            )[0]
             .message
-            .contains("exceeds max"));
+            .contains("exceeds max")
+        );
     }
 
     #[test]
@@ -1669,15 +1868,15 @@ mod tests {
     fn validation_schema_malformed_cases() {
         let d = deserialize::from_str("a: 1\n").unwrap();
         // invalid regex
-        let s = deserialize::from_str("a:\n  type: str\n  validation:\n    pattern: \"[\"\n").unwrap();
+        let s =
+            deserialize::from_str("a:\n  type: str\n  validation:\n    pattern: \"[\"\n").unwrap();
         assert!(matches!(
             verify(&d, &s),
             Err(VerifyError::SchemaMalformed(_))
         ));
         // RE2 dialect: look-around not supported
-        let s =
-            deserialize::from_str("a:\n  type: str\n  validation:\n    pattern: \"(?<=a)b\"\n")
-                .unwrap();
+        let s = deserialize::from_str("a:\n  type: str\n  validation:\n    pattern: \"(?<=a)b\"\n")
+            .unwrap();
         match verify(&d, &s) {
             Err(VerifyError::SchemaMalformed(v)) => {
                 assert!(v.iter().any(|x| x.message.contains("invalid pattern")));
