@@ -677,7 +677,8 @@ fn check(schema: &Node, data: &Node, path: &str, out: &mut Vec<Violation>) {
         }
         Node::Dict(m) => {
             // Single-entry dict form (spec §5): the data value must be a
-            // dict and every value must match the single entry type.
+            // dict. The entry is illustrative only (unmanaged dict): any
+            // keys match and values are unchecked, mixed types allowed.
             if m.len() != 1 {
                 out.push(Violation::new(
                     path,
@@ -688,16 +689,11 @@ fn check(schema: &Node, data: &Node, path: &str, out: &mut Vec<Violation>) {
                 ));
                 return;
             }
-            let Some(dm) = data.as_dict() else {
+            if data.as_dict().is_none() {
                 out.push(Violation::new(
                     path,
                     format!("expected a dict, found {}", kind_of(data)),
                 ));
-                return;
-            };
-            let (_, element) = &m.entries()[0];
-            for (k, v) in dm.iter() {
-                check(element, v, &join(path, k), out);
             }
         }
         Node::List(items) => {
@@ -1308,24 +1304,23 @@ mod tests {
     }
 
     #[test]
-    fn single_entry_dict_checks_every_value() {
+    fn single_entry_dict_is_unmanaged() {
+        // The single-entry form declares an unmanaged dict: any keys match
+        // and values are unchecked, mixed types allowed.
         ok(
             "metrics:\n  = \"a\": 1.5\n  = \"b\": 2.5\n",
             "metrics:\n  = \"example\": float\n",
         );
-        assert_eq!(
-            errs(
-                "metrics:\n  = \"a\": 1.5\n  = \"b\": \"x\"\n",
-                "metrics:\n  = \"example\": float\n",
-            ),
-            vec![Violation::new("metrics.b", "expected float, found string")]
+        ok(
+            "metrics:\n  = \"a\": 1.5\n  = \"b\": \"x\"\n  = \"c\": true\n",
+            "metrics:\n  = \"example\": float\n",
         );
-        // Data must be a dict, not node prefixes.
+        // Data must still be a dict, not node prefixes.
         assert_eq!(
             errs("m:\n  a: 1\n", "m:\n  = \"example\": int\n"),
             vec![Violation::new("m", "expected a dict, found a map")]
         );
-        // Nested value types.
+        // Nested values unchecked too.
         ok(
             "groups:\n  = \"team-a\":\n    - \"amy\"\n",
             "groups:\n  = \"example\":\n    - str\n",
