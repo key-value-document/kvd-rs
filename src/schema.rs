@@ -215,21 +215,11 @@ fn validate_schema(schema: &Node, path: &str, out: &mut Vec<Violation>) {
             }
         }
         Node::Dict(m) => {
-            // Single-entry dict form (spec §5): exactly one entry whose
-            // value declares the uniform value type. The example key is a
-            // placeholder; any dict key matches.
-            if m.len() != 1 {
-                out.push(Violation::new(
-                    path,
-                    format!(
-                        "schema dict must declare exactly one entry type, found {}",
-                        m.len()
-                    ),
-                ));
-                return;
+            // Dict form (spec §5): any number of entries; each entry
+            // value is validated as a type declaration for that key.
+            for (k, sub) in m.iter() {
+                validate_schema(sub, &join(path, k), out);
             }
-            let (_, sub) = &m.entries()[0];
-            validate_schema(sub, &format!("{path}[\"example\"]"), out);
         }
         Node::List(items) => {
             if items.is_empty() {
@@ -606,8 +596,8 @@ fn check_list(schema: &Node, data: &Node, path: &str, out: &mut Vec<Violation>) 
 }
 
 /// Verifies a `type: dict` descriptor: `data` is a keyed collection (spec
-/// §5). Typed dicts use the single-entry form; contents are not checked
-/// here unless an `element` type is present. Enforces length constraints.
+/// §5). Without `element`, any dict passes; with `element`, every value
+/// must match it (managed opt-in). Enforces length constraints.
 fn check_dict(schema: &Node, data: &Node, path: &str, out: &mut Vec<Violation>) {
     let Some(_) = data.as_keyed() else {
         out.push(Violation::new(
@@ -676,24 +666,21 @@ fn check(schema: &Node, data: &Node, path: &str, out: &mut Vec<Violation>) {
             }
         }
         Node::Dict(m) => {
-            // Single-entry dict form (spec §5): the data value must be a
-            // dict. The entry is illustrative only (unmanaged dict): any
-            // keys match and values are unchecked, mixed types allowed.
-            if m.len() != 1 {
-                out.push(Violation::new(
-                    path,
-                    format!(
-                        "schema dict must declare exactly one entry type, found {}",
-                        m.len()
-                    ),
-                ));
-                return;
-            }
-            if data.as_dict().is_none() {
+            // Dict form (spec §5): the data value must be a dict.
+            // Declared keys present in the data are checked against
+            // their type; declared keys may be absent (optional) and
+            // undeclared data keys pass unchecked (any type).
+            let Some(dm) = data.as_dict() else {
                 out.push(Violation::new(
                     path,
                     format!("expected a dict, found {}", kind_of(data)),
                 ));
+                return;
+            };
+            for (k, sub) in m.iter() {
+                if let Some(v) = dm.get(k) {
+                    check(sub, v, &join(path, k), out);
+                }
             }
         }
         Node::List(items) => {
@@ -1304,39 +1291,64 @@ mod tests {
     }
 
     #[test]
-    fn single_entry_dict_is_unmanaged() {
-        // The single-entry form declares an unmanaged dict: any keys match
-        // and values are unchecked, mixed types allowed.
+    fn dict_declared_keys_checked_undeclared_pass() {
+        // Declared keys present in the data are checked; undeclared data
+        // keys pass with any type; declared keys may be absent.
         ok(
-            "metrics:\n  = \"a\": 1.5\n  = \"b\": 2.5\n",
-            "metrics:\n  = \"example\": float\n",
+            "metrics:\n  = \"errors/total\": 3\n  = \"another\": 1.2\n",
+            "metrics:\n  = \"errors/total\": int\n  = \"another\": float\n",
         );
+        // Wrong type on a declared key fails.
+        assert_eq!(
+            errs(
+                "metrics:\n  = \"errors/total\": \"x\"\n",
+                "metrics:\n  = \"errors/total\": int\n",
+            ),
+            vec![Violation::new(
+                "metrics.errors/total",
+                "expected int, found string"
+            )]
+        );
+        // Undeclared data key with any type passes.
         ok(
-            "metrics:\n  = \"a\": 1.5\n  = \"b\": \"x\"\n  = \"c\": true\n",
-            "metrics:\n  = \"example\": float\n",
+            "metrics:\n  = \"errors/total\": 3\n  = \"whatever\": \"x\"\n",
+            "metrics:\n  = \"errors/total\": int\n",
+        );
+        // Declared key absent from data is fine (optional).
+        ok(
+            "metrics:\n  = \"other\": 1.2\n",
+            "metrics:\n  = \"errors/total\": int\n",
         );
         // Data must still be a dict, not node prefixes.
         assert_eq!(
             errs("m:\n  a: 1\n", "m:\n  = \"example\": int\n"),
             vec![Violation::new("m", "expected a dict, found a map")]
         );
-        // Nested values unchecked too.
+        // Nested declared types work.
         ok(
             "groups:\n  = \"team-a\":\n    - \"amy\"\n",
-            "groups:\n  = \"example\":\n    - str\n",
+            "groups:\n  = \"team-a\":\n    - str\n",
+        );
+        assert_eq!(
+            errs(
+                "groups:\n  = \"team-a\":\n    - 1\n",
+                "groups:\n  = \"team-a\":\n    - str\n",
+            ),
+            vec![Violation::new(
+                "groups.team-a[0]",
+                "expected string, found int"
+            )]
         );
     }
 
     #[test]
-    fn schema_dict_must_declare_one_entry() {
-        let s = deserialize::from_str("m:\n  = \"a\": int\n  = \"b\": str\n").unwrap();
+    fn schema_dict_entry_types_validated() {
+        // Unknown type in a declared entry is malformed schema.
+        let s = deserialize::from_str("m:\n  = \"a\": port\n").unwrap();
         let d = deserialize::from_str("m:\n  = \"a\": 1\n").unwrap();
         assert_eq!(
             verify(&d, &s).unwrap_err(),
-            VerifyError::SchemaMalformed(vec![Violation::new(
-                "m",
-                "schema dict must declare exactly one entry type, found 2"
-            )])
+            VerifyError::SchemaMalformed(vec![Violation::new("m.a", "unknown type `port`")])
         );
     }
 
