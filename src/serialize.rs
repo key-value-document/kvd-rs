@@ -259,41 +259,6 @@ fn emit_inline_entry(
 /// `closer_col` is the column where the `"""` closer is written — for a
 /// key value this is `content_col`; for a bare list item it is `content_col + 2`
 /// because content and closer share the same column (spec §5).
-fn format_int_favored(text: &str) -> String {
-    let (sign, digits) = match text.chars().next() {
-        Some('+') | Some('-') => (&text[0..1], &text[1..]),
-        _ => ("", text),
-    };
-    let clean: String = digits.chars().filter(|c| *c != '_').collect();
-    if clean.len() <= 3 {
-        let mut out = String::with_capacity(sign.len() + clean.len());
-        out.push_str(sign);
-        out.push_str(&clean);
-        return out;
-    }
-    let len = clean.len();
-    let first = len % 3;
-    let mut out = String::with_capacity(sign.len() + clean.len() + clean.len() / 3);
-    out.push_str(sign);
-    let mut i = 0;
-    if first != 0 {
-        out.push_str(&clean[0..first]);
-        i = first;
-        if i < len {
-            out.push('_');
-        }
-    }
-    while i < len {
-        let end = (i + 3).min(len);
-        out.push_str(&clean[i..end]);
-        i = end;
-        if i < len {
-            out.push('_');
-        }
-    }
-    out
-}
-
 fn write_scalar_value(
     s: &Scalar,
     content_col: usize,
@@ -302,7 +267,7 @@ fn write_scalar_value(
 ) -> Result<(), SerializeError> {
     match s.shape {
         Shape::Int => {
-            write!(out, "{}", format_int_favored(&s.text))?;
+            write!(out, "{}", s.text)?;
         }
         Shape::Float | Shape::Bool => {
             write!(out, "{}", s.text)?;
