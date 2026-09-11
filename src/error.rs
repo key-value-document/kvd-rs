@@ -119,13 +119,25 @@ mod tests {
 
     #[test]
     fn error_kind_names() {
-        assert_eq!(ErrorKind::BadIndent.as_str(), "bad-indent");
-        assert_eq!(ErrorKind::BadDictMarker.as_str(), "bad-dict-marker");
-        assert_eq!(
-            ErrorKind::UnexpectedCharacter.as_str(),
-            "unexpected-character"
-        );
-        assert_eq!(ErrorKind::DuplicateKey.to_string(), "duplicate-key");
+        for (kind, name) in [
+            (ErrorKind::BadIndent, "bad-indent"),
+            (ErrorKind::Tab, "tab"),
+            (ErrorKind::BadListMarker, "bad-list-marker"),
+            (ErrorKind::BadDictMarker, "bad-dict-marker"),
+            (ErrorKind::MisalignedKey, "misaligned-key"),
+            (ErrorKind::MissingValue, "missing-value"),
+            (ErrorKind::DuplicateKey, "duplicate-key"),
+            (ErrorKind::LeafInteriorConflict, "leaf-interior-conflict"),
+            (ErrorKind::BadPath, "bad-path"),
+            (ErrorKind::Unterminated, "unterminated"),
+            (ErrorKind::DepthLimit, "depth-limit"),
+            (ErrorKind::UnexpectedCharacter, "unexpected-character"),
+            (ErrorKind::NotAMap, "not-a-map"),
+            (ErrorKind::KeyNotFound, "key-not-found"),
+        ] {
+            assert_eq!(kind.as_str(), name);
+            assert_eq!(kind.to_string(), name);
+        }
     }
 
     #[test]

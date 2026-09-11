@@ -802,6 +802,46 @@ mod tests {
     }
 
     #[test]
+    fn serialize_error_display() {
+        let e = SerializeError::new("oops");
+        assert_eq!(e.to_string(), "oops");
+        let _: &dyn core::error::Error = &e;
+        let fmt_err: SerializeError = core::fmt::Error.into();
+        assert_eq!(fmt_err.to_string(), "failed to write output");
+    }
+
+    #[test]
+    fn empty_key_rejected() {
+        let d = doc(&[("", scalar(Shape::Int, "1"))]);
+        assert!(to_string(&d).is_err());
+    }
+
+    #[test]
+    fn empty_map_in_list_uses_literal() {
+        // `- {}` for an empty map item.
+        let d = doc(&[("l", Node::list(vec![Node::map(Map::new())]))]);
+        assert_eq!(to_string(&d).unwrap(), "l:\n  - {}\n");
+    }
+
+    #[test]
+    fn triple_with_blank_and_leading_spaces() {
+        // Blank lines stay blank; leading spaces are escaped.
+        let d = doc(&[("k", scalar(Shape::Str, "a\n\n  indented\n"))]);
+        let out = to_string(&d).unwrap();
+        let reparsed = crate::deserialize::from_str(&out).unwrap();
+        assert_eq!(reparsed, d);
+        assert!(out.contains("\\u0020"));
+    }
+
+    #[test]
+    fn triple_inline_closer_empty_last_line() {
+        // Text ending without newline whose last line is empty.
+        let d = doc(&[("k", scalar(Shape::Str, "a\n"))]);
+        let out = to_string(&d).unwrap();
+        assert_eq!(crate::deserialize::from_str(&out).unwrap(), d);
+    }
+
+    #[test]
     fn nested_dict_emits_nested_entries() {
         let mut inner = Map::new();
         inner.insert("b".into(), scalar(Shape::Int, "1"));

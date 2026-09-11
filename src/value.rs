@@ -576,6 +576,55 @@ mod tests {
     }
 
     #[test]
+    fn scalar_int_equality_ignores_separators() {
+        let a = Scalar::new(Shape::Int, "1_000");
+        let b = Scalar::new(Shape::Int, "1000");
+        assert_eq!(a, b);
+        assert_ne!(a, Scalar::new(Shape::Int, "1001"));
+        assert_ne!(a, Scalar::new(Shape::Str, "1_000"));
+        // Mismatched lengths.
+        assert_ne!(Scalar::new(Shape::Int, "10"), Scalar::new(Shape::Int, "100"));
+        // Separators are ignored, so "1_" equals "1" (grammar rejects "1_"
+        // at parse time; equality is purely textual).
+        assert_eq!(Scalar::new(Shape::Int, "1_"), Scalar::new(Shape::Int, "1"));
+    }
+
+    #[test]
+    fn dict_mut_and_opt_mut_accessors() {
+        let mut n = Node::dict(Map::new());
+        assert!(n.as_dict_mut().is_some());
+        assert!(Node::map(Map::new()).as_dict_mut().is_none());
+        let mut root = Node::map(Map::new());
+        root.as_map_mut().unwrap().insert("a".into(), Node::scalar(Shape::Int, "1"));
+        assert!(root.get_opt_mut("a").is_some());
+        assert!(root.get_opt_mut("missing").is_none());
+        *root.get_mut("a").unwrap() = Node::scalar(Shape::Int, "2");
+        assert_eq!(root.get("a").unwrap().as_scalar().unwrap().text, "2");
+        assert!(root.get_mut("missing").is_err());
+        let mut scalar = Node::scalar(Shape::Int, "1");
+        assert!(scalar.get_mut("x").is_err());
+        assert!(scalar.get_opt_mut("x").is_none());
+    }
+
+    #[test]
+    fn non_map_kind_names_shapes() {
+        // Exercised through get() error messages: scalars and lists are
+        // not keyed; maps/dicts report the missing key instead.
+        for (node, word) in [
+            (Node::scalar(Shape::Int, "1"), "scalar"),
+            (Node::list(vec![]), "list"),
+        ] {
+            let e = node.get("x").unwrap_err();
+            assert_eq!(e.kind, ErrorKind::NotAMap);
+            assert!(e.message.contains(word), "got: {}", e.message);
+        }
+        for node in [Node::map(Map::new()), Node::dict(Map::new())] {
+            let e = node.get("x").unwrap_err();
+            assert_eq!(e.kind, ErrorKind::KeyNotFound);
+        }
+    }
+
+    #[test]
     fn node_get_navigates_and_errors() {
         let mut app = Node::map(Map::new());
         app.as_map_mut()

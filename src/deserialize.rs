@@ -1748,6 +1748,92 @@ b: \"\"\"
     }
 
     #[test]
+    fn err_no_space_after_colon() {
+        // `key:value` with no space is an error (both pair and dict forms).
+        assert_eq!(err("a:1").kind, UnexpectedCharacter);
+        assert_eq!(err("m:\n  = \"k\":1\n").kind, UnexpectedCharacter);
+    }
+
+    #[test]
+    fn err_double_space_after_dash_and_equals() {
+        // Exactly one space after `-` / `=`.
+        assert_eq!(err("l:\n  -  x\n").kind, BadListMarker);
+        assert_eq!(err("m:\n  =  \"k\": 1\n").kind, BadDictMarker);
+    }
+
+    #[test]
+    fn err_misaligned_list_markers_and_entries() {
+        // List markers must sit exactly at the parent indent + 2.
+        assert_eq!(err("l:\n   - \"x\"\n").kind, BadIndent);
+        // Dict entries must sit exactly at the parent indent + 2.
+        assert_eq!(err("m:\n   = \"k\": 1\n").kind, BadIndent);
+    }
+
+    #[test]
+    fn err_misaligned_item_keys() {
+        // Continuation keys in a list item must align to the first key.
+        assert_eq!(
+            err("l:\n  - a: 1\n     b: 2\n").kind,
+            MisalignedKey
+        );
+    }
+
+    #[test]
+    fn err_bare_marker_missing_content() {
+        // Bare `-` / `= "k":` with nothing below is missing-value.
+        assert_eq!(err("l:\n  -\n").kind, MissingValue);
+        assert_eq!(err("m:\n  = \"k\":\n").kind, MissingValue);
+        // Content at the wrong indent is bad-indent.
+        assert_eq!(err("l:\n  -\n      x\n").kind, BadIndent);
+        assert_eq!(err("m:\n  = \"k\":\n      1\n").kind, BadIndent);
+    }
+
+    #[test]
+    fn err_dict_key_problems() {
+        // Bare dict keys, empty keys, missing colons.
+        assert_eq!(err("m:\n  = k: 1\n").kind, BadDictMarker);
+        assert_eq!(err("m:\n  = \"\": 1\n").kind, BadDictMarker);
+        assert_eq!(err("m:\n  = \"k\" 1\n").kind, BadDictMarker);
+        // Unterminated quoted dict key surfaces as unterminated.
+        assert_eq!(err("m:\n  = \"k: 1\n").kind, Unterminated);
+        // Trailing content after a quoted scalar is an error.
+        assert_eq!(err("a: \"x\" y\n").kind, UnexpectedCharacter);
+        assert_eq!(err("a: 'x' y\n").kind, UnexpectedCharacter);
+    }
+
+    #[test]
+    fn err_triple_opener_on_same_line() {
+        // `"""x"""` inline openers are rejected.
+        assert_eq!(err("a: \"\"\"x\"\"\"\n").kind, UnexpectedCharacter);
+        assert_eq!(err("m:\n  = \"k\": \"\"\"x\"\"\"\n").kind, UnexpectedCharacter);
+    }
+
+    #[test]
+    fn err_unterminated_triple() {
+        assert_eq!(err("a: \"\"\"\n  line\n").kind, Unterminated);
+    }
+
+    #[test]
+    fn err_bad_path_segments() {
+        assert_eq!(err(".a: 1\n").kind, BadPath);
+        assert_eq!(err("a.: 1\n").kind, BadPath);
+        assert_eq!(err("a..b: 1\n").kind, BadPath);
+        assert_eq!(err("\"\": 1\n").kind, BadPath);
+    }
+
+    #[test]
+    fn err_expected_key_colon() {
+        // A line with no colon where a pair was expected.
+        assert_eq!(err("a\n").kind, UnexpectedCharacter);
+    }
+
+    #[test]
+    fn after_marker_helper() {
+        assert_eq!(super::after_marker("- x"), "x");
+        assert_eq!(super::after_marker("= \"k\": 1"), "\"k\": 1");
+    }
+
+    #[test]
     fn dict_round_trip_canonical() {
         let cases = [
             "metrics:\n  = \"a.b.c/name\": 99.9\n  = \"errors/total\": 3\n",

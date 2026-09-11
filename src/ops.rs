@@ -718,6 +718,56 @@ mod tests {
     }
 
     #[test]
+    fn segment_accessors() {
+        let k = Segment::Key("a".into());
+        assert_eq!(k.as_key(), Some("a"));
+        assert_eq!(k.as_index(), None);
+        let i = Segment::Index(2);
+        assert_eq!(i.as_index(), Some(2));
+        assert_eq!(i.as_key(), None);
+        assert!(Path::default().is_empty());
+        assert!(!Path::parse("a").unwrap().is_empty());
+    }
+
+    #[test]
+    fn op_error_display() {
+        assert!(OpError::BadPath("x".into()).to_string().contains("bad path"));
+        assert!(OpError::MissingKey("k".into()).to_string().contains("missing key"));
+        assert!(OpError::IndexOutOfBounds(3).to_string().contains("3"));
+        assert_eq!(OpError::NotAMap.to_string(), "expected a map");
+        assert_eq!(OpError::NotAList.to_string(), "expected a list");
+        assert_eq!(OpError::TypeMismatch.to_string(), "type mismatch");
+        let _: &dyn core::error::Error = &OpError::NotAMap;
+    }
+
+    #[test]
+    fn set_nested_list_element() {
+        // set through a list index into a nested map.
+        let mut d = doc();
+        crate::ops::set(
+            &mut d,
+            &Path::parse("list[0]").unwrap(),
+            Node::scalar(Shape::Str, "z"),
+        )
+        .unwrap();
+        assert_eq!(
+            get(&d, &Path::parse("list[0]").unwrap())
+                .unwrap()
+                .as_scalar()
+                .unwrap()
+                .text,
+            "z"
+        );
+    }
+
+    #[test]
+    fn remove_root_rejected() {
+        let mut d = doc();
+        assert!(remove(&mut d, &Path::default()).is_err());
+        assert!(remove_recursive(&mut d, &Path::default()).is_err());
+    }
+
+    #[test]
     fn remove_recursive_does_not_prune_list_elements() {
         // list: [ { leaf: "v" } ]
         let mut inner = Map::new();

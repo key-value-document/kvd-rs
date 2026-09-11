@@ -71,19 +71,17 @@ pub fn looks_like_number(s: &str) -> bool {
 
 /// `[+-]?0 | [+-]?[1-9][0-9]* | [+-]?[1-9][0-9]{0,2}(_[0-9]{3})+` (spec §3).
 pub fn is_int(s: &str) -> bool {
-    let bytes = strip_sign(s).as_bytes();
-    if bytes.is_empty() {
+    let digits = strip_sign(s);
+    if digits.is_empty() {
         return false;
     }
+    let bytes = digits.as_bytes();
     if bytes[0] == b'0' {
         return bytes.len() == 1;
     }
     if !(b'1'..=b'9').contains(&bytes[0]) {
         return false;
     }
-    let Ok(digits) = core::str::from_utf8(bytes) else {
-        return false;
-    };
     if !digits.contains('_') {
         return digits.bytes().all(|b| b.is_ascii_digit());
     }

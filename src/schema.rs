@@ -174,7 +174,10 @@ pub fn verify_from_str(doc: &str, schema: &str) -> Result<(), VerifyError> {
 /// literals, or descriptor maps carrying a `type`. Problems found here are
 /// surfaced as [`VerifyError::SchemaMalformed`], separate from document
 /// violations.
-fn validate_schema(schema: &Node, path: &str, out: &mut Vec<Violation>) {
+///
+/// Call with `path = ""` and an empty `out` at the root; recursion threads
+/// the dotted path through nested nodes.
+pub fn validate_schema(schema: &Node, path: &str, out: &mut Vec<Violation>) {
     match schema {
         Node::Scalar(_) => match descriptor(schema) {
             Some((name, _)) if name == "list" || name == "dict" => out.push(Violation::new(
@@ -1846,5 +1849,101 @@ mod tests {
             verify(&d, &s),
             Err(VerifyError::SchemaMalformed(_))
         ));
+    }
+
+    #[test]
+    fn violation_and_error_display() {
+        // Empty-path violation prints the message alone.
+        assert_eq!(Violation::new("", "oops").to_string(), "oops");
+        assert_eq!(
+            Violation::new("a", "bad").to_string(),
+            "a: bad"
+        );
+        // ParseSchema display path.
+        let e = verify_from_str("a: 1\n", "a:\n  b\n").unwrap_err();
+        assert!(e.to_string().starts_with("schema parse error:"));
+        let _: &dyn core::error::Error = &e;
+    }
+
+    #[test]
+    fn regex_cache_evicts_when_full() {
+        // Fill the cache past its cap with distinct valid patterns.
+        for i in 0..80 {
+            let pat = format!("x{i}y");
+            let schema = format!("a:\n  type: str\n  validation:\n    pattern: \"{pat}\"\n");
+            let d = deserialize::from_str(format!("a: \"x{i}y\"\n").as_str()).unwrap();
+            let s = deserialize::from_str(&schema).unwrap();
+            assert!(verify(&d, &s).is_ok(), "pattern {pat} should verify");
+        }
+        // Cache still serves: repeat a pattern.
+        let d = deserialize::from_str("a: \"x\"\n").unwrap();
+        let s = deserialize::from_str("a:\n  type: str\n  validation:\n    pattern: \"x+\"\n").unwrap();
+        assert!(verify(&d, &s).is_ok());
+    }
+
+    #[test]
+    fn descriptor_and_deprecated_shape_errors() {
+        let d = deserialize::from_str("a: 1\n").unwrap();
+        // description must be a string.
+        let s = deserialize::from_str("a:\n  type: int\n  description: 1\n").unwrap();
+        assert!(matches!(
+            verify(&d, &s),
+            Err(VerifyError::SchemaMalformed(_))
+        ));
+        // deprecated must be a dict.
+        let s = deserialize::from_str("a:\n  type: int\n  deprecated: yes\n").unwrap();
+        assert!(matches!(
+            verify(&d, &s),
+            Err(VerifyError::SchemaMalformed(_))
+        ));
+        // deprecated with unknown key.
+        let s = deserialize::from_str(
+            "a:\n  type: int\n  deprecated:\n    bogus: \"x\"\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            verify(&d, &s),
+            Err(VerifyError::SchemaMalformed(_))
+        ));
+        // deprecated value must be a string.
+        let s = deserialize::from_str(
+            "a:\n  type: int\n  deprecated:\n    reason: 1\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            verify(&d, &s),
+            Err(VerifyError::SchemaMalformed(_))
+        ));
+        // constraint value of the wrong shape.
+        let s = deserialize::from_str("a:\n  type: int\n  validation:\n    min: \"x\"\n").unwrap();
+        assert!(matches!(
+            verify(&d, &s),
+            Err(VerifyError::SchemaMalformed(_))
+        ));
+        // float bound on int type.
+        let s = deserialize::from_str("a:\n  type: int\n  validation:\n    min: 0.5\n").unwrap();
+        assert!(matches!(
+            verify(&d, &s),
+            Err(VerifyError::SchemaMalformed(_))
+        ));
+        // pattern must be a string.
+        let s = deserialize::from_str("a:\n  type: str\n  validation:\n    pattern: 1\n").unwrap();
+        assert!(matches!(
+            verify(&d, &s),
+            Err(VerifyError::SchemaMalformed(_))
+        ));
+        // min_len must be a non-negative int.
+        let s = deserialize::from_str("a:\n  type: str\n  validation:\n    min_len: -1\n").unwrap();
+        assert!(matches!(
+            verify(&d, &s),
+            Err(VerifyError::SchemaMalformed(_))
+        ));
+        // huge int bounds compare correctly.
+        let d = deserialize::from_str("a: 99999999999999999999\n").unwrap();
+        let s = deserialize::from_str(
+            "a:\n  type: int\n  validation:\n    min: 99999999999999999998\n",
+        )
+        .unwrap();
+        assert!(verify(&d, &s).is_ok());
     }
 }
