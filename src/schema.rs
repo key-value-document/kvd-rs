@@ -20,7 +20,12 @@ use std::sync::{Mutex, OnceLock};
 
 /// Global cache for compiled regexes: anchored pattern → Regex.
 /// Avoids recompiling the same `pattern` on every value check.
+/// Capped to bound memory: a hostile schema with many distinct patterns
+/// cannot grow it without limit; when full the cache is cleared.
 static REGEX_CACHE: OnceLock<Mutex<HashMap<String, regex::Regex>>> = OnceLock::new();
+
+/// Maximum compiled patterns retained in [`REGEX_CACHE`].
+const REGEX_CACHE_CAP: usize = 64;
 
 fn regex_for_pattern(pattern: &str) -> Result<regex::Regex, regex::Error> {
     let anchored = format!("^(?:{pattern})$");
@@ -34,6 +39,9 @@ fn regex_for_pattern(pattern: &str) -> Result<regex::Regex, regex::Error> {
     }
     let re = regex::Regex::new(&anchored)?;
     let mut map = cache.lock().unwrap();
+    if map.len() >= REGEX_CACHE_CAP {
+        map.clear();
+    }
     map.insert(anchored, re.clone());
     Ok(re)
 }
@@ -238,9 +246,22 @@ fn validate_descriptor_schema(m: &Map, type_name: &str, path: &str, out: &mut Ve
     }
     // Check for unexpected keys at descriptor level.
     let allowed_descriptor_keys: &[&str] = if type_name == "list" || type_name == "dict" {
-        &["type", "optional", "description", "deprecated", "validation", "element"]
+        &[
+            "type",
+            "optional",
+            "description",
+            "deprecated",
+            "validation",
+            "element",
+        ]
     } else {
-        &["type", "optional", "description", "deprecated", "validation"]
+        &[
+            "type",
+            "optional",
+            "description",
+            "deprecated",
+            "validation",
+        ]
     };
     for (k, _) in m.iter() {
         if !allowed_descriptor_keys.contains(&k) {
@@ -271,7 +292,9 @@ fn validate_descriptor_schema(m: &Map, type_name: &str, path: &str, out: &mut Ve
                     if k != "reason" && k != "since" {
                         out.push(Violation::new(
                             join_path(&join_path(path, "deprecated"), k),
-                            format!("unknown key `{k}` in `deprecated` (expected one of reason, since)"),
+                            format!(
+                                "unknown key `{k}` in `deprecated` (expected one of reason, since)"
+                            ),
                         ));
                         continue;
                     }

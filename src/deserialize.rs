@@ -248,7 +248,7 @@ impl Parser {
                 continue;
             }
             // `- content`: exactly one space after the dash.
-            if self.lines[self.pos].rest[2..].starts_with(' ') {
+            if after_marker(&self.lines[self.pos].rest).starts_with(' ') {
                 return Err(error(
                     ErrorKind::BadListMarker,
                     line_no,
@@ -256,7 +256,7 @@ impl Parser {
                     "expected exactly one space after '-'",
                 ));
             }
-            let content = strip_comment(&self.lines[self.pos].rest[2..])
+            let content = strip_comment(after_marker(&self.lines[self.pos].rest))
                 .trim_end()
                 .to_string();
             if content.is_empty() {
@@ -325,7 +325,7 @@ impl Parser {
     /// indent + 2 (used for compact `- - x`, `- = "k": v`, and inline
     /// `- pair:` forms).
     fn rewrite_inline_marker(&mut self) {
-        let inner = self.lines[self.pos].rest[2..].to_string();
+        let inner = after_marker(&self.lines[self.pos].rest).to_string();
         let slot = &mut self.lines[self.pos];
         slot.indent += 2;
         slot.rest = inner;
@@ -424,7 +424,7 @@ impl Parser {
                 ));
             }
             // `= content`: exactly one space after the equals.
-            if self.lines[self.pos].rest[2..].starts_with(' ') {
+            if after_marker(&self.lines[self.pos].rest).starts_with(' ') {
                 return Err(error(
                     ErrorKind::BadDictMarker,
                     line_no,
@@ -432,7 +432,7 @@ impl Parser {
                     "expected exactly one space after '='",
                 ));
             }
-            let content = strip_comment(&self.lines[self.pos].rest[2..])
+            let content = strip_comment(after_marker(&self.lines[self.pos].rest))
                 .trim_end()
                 .to_string();
             if content.is_empty() {
@@ -963,6 +963,14 @@ fn scan_escapes(s: &str, line_no: usize, col: usize) -> Result<String> {
 ///
 /// Double-quoted strings respect `\` escapes; single-quoted strings are
 /// literal and cannot contain `'` (spec §3), so no escape handling is needed.
+/// Returns the text after a `- `/`= ` marker prefix (the two bytes `- `
+/// or `= `). Callers only reach here after confirming the marker prefix,
+/// so the line is always at least 2 bytes; the assertion documents that.
+fn after_marker(rest: &str) -> &str {
+    debug_assert!(rest.len() >= 2, "marker line shorter than `- `/`= ` prefix");
+    &rest[2..]
+}
+
 fn strip_comment(s: &str) -> &str {
     let mut in_dq = false;
     let mut in_sq = false;

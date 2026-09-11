@@ -40,6 +40,7 @@
 //! ```
 
 #![warn(missing_docs)]
+#![deny(unsafe_code)]
 
 extern crate alloc;
 
