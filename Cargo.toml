@@ -1,7 +1,7 @@
 [package]
 name = "kvd-rs"
 description = "KVD — Key-Value Document format: value model, error model, serializer, and §10 validation"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.85.0"
 license = "MIT"
