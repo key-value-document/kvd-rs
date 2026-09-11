@@ -583,7 +583,10 @@ mod tests {
         assert_ne!(a, Scalar::new(Shape::Int, "1001"));
         assert_ne!(a, Scalar::new(Shape::Str, "1_000"));
         // Mismatched lengths.
-        assert_ne!(Scalar::new(Shape::Int, "10"), Scalar::new(Shape::Int, "100"));
+        assert_ne!(
+            Scalar::new(Shape::Int, "10"),
+            Scalar::new(Shape::Int, "100")
+        );
         // Separators are ignored, so "1_" equals "1" (grammar rejects "1_"
         // at parse time; equality is purely textual).
         assert_eq!(Scalar::new(Shape::Int, "1_"), Scalar::new(Shape::Int, "1"));
@@ -595,7 +598,9 @@ mod tests {
         assert!(n.as_dict_mut().is_some());
         assert!(Node::map(Map::new()).as_dict_mut().is_none());
         let mut root = Node::map(Map::new());
-        root.as_map_mut().unwrap().insert("a".into(), Node::scalar(Shape::Int, "1"));
+        root.as_map_mut()
+            .unwrap()
+            .insert("a".into(), Node::scalar(Shape::Int, "1"));
         assert!(root.get_opt_mut("a").is_some());
         assert!(root.get_opt_mut("missing").is_none());
         *root.get_mut("a").unwrap() = Node::scalar(Shape::Int, "2");

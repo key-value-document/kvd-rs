@@ -1772,10 +1772,7 @@ b: \"\"\"
     #[test]
     fn err_misaligned_item_keys() {
         // Continuation keys in a list item must align to the first key.
-        assert_eq!(
-            err("l:\n  - a: 1\n     b: 2\n").kind,
-            MisalignedKey
-        );
+        assert_eq!(err("l:\n  - a: 1\n     b: 2\n").kind, MisalignedKey);
     }
 
     #[test]
@@ -1805,7 +1802,10 @@ b: \"\"\"
     fn err_triple_opener_on_same_line() {
         // `"""x"""` inline openers are rejected.
         assert_eq!(err("a: \"\"\"x\"\"\"\n").kind, UnexpectedCharacter);
-        assert_eq!(err("m:\n  = \"k\": \"\"\"x\"\"\"\n").kind, UnexpectedCharacter);
+        assert_eq!(
+            err("m:\n  = \"k\": \"\"\"x\"\"\"\n").kind,
+            UnexpectedCharacter
+        );
     }
 
     #[test]

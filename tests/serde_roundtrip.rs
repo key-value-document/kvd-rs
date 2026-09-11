@@ -317,3 +317,604 @@ fn newtype_and_tuple_forms() {
     assert_eq!(w.p, Pair(7, "x".into()));
     assert_eq!(to_string(&w).unwrap(), "m: 42\np:\n  - 7\n  - \"x\"\n");
 }
+
+#[test]
+fn scalar_type_mismatches_error() {
+    // Every describe() arm: wrong shape for the target type.
+    let err: SerdeError =
+        from_str::<Cfg>("app:\n  port: \"8080\"\n  host: \"h\"\n  debug: true\n  ratio: 0.5\n")
+            .unwrap_err();
+    assert!(err.to_string().contains("int"), "{err}");
+    let err: SerdeError =
+        from_str::<Cfg>("app:\n  port: 1\n  host: 2\n  debug: true\n  ratio: 0.5\n").unwrap_err();
+    assert!(err.to_string().contains("string"), "{err}");
+    let err: SerdeError =
+        from_str::<Cfg>("app:\n  port: 1\n  host: \"h\"\n  debug: yes\n  ratio: 0.5\n")
+            .unwrap_err();
+    assert!(err.to_string().contains("bool"), "{err}");
+    let err: SerdeError =
+        from_str::<Cfg>("app:\n  port: 1\n  host: \"h\"\n  debug: true\n  ratio: \"x\"\n")
+            .unwrap_err();
+    assert!(err.to_string().contains("float"), "{err}");
+}
+
+#[test]
+fn int_out_of_range_errors() {
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    struct Small {
+        n: i8,
+    }
+    // 999 does not fit in i8.
+    let err: SerdeError = from_str::<Small>("n: 999\n").unwrap_err();
+    assert!(!err.to_string().is_empty());
+    // Huge literal beyond u64.
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    struct Big {
+        n: u64,
+    }
+    let err: SerdeError = from_str::<Big>("n: 99999999999999999999999\n").unwrap_err();
+    assert!(err.to_string().contains("64 bits"), "{err}");
+    // Negative into unsigned.
+    let err: SerdeError = from_str::<Big>("n: -5\n").unwrap_err();
+    assert!(!err.to_string().is_empty());
+}
+
+#[test]
+fn char_and_unit_types() {
+    #[derive(Debug, PartialEq, Deserialize)]
+    struct C {
+        c: char,
+    }
+    let v: C = from_str("c: \"x\"\n").unwrap();
+    assert_eq!(v.c, 'x');
+    assert!(from_str::<C>("c: \"xy\"\n").is_err());
+    assert!(from_str::<C>("c: 1\n").is_err());
+
+    #[derive(Debug, PartialEq, Deserialize)]
+    struct U {
+        u: (),
+    }
+    let v: U = from_str("u: null\n").unwrap();
+    assert_eq!(v.u, ());
+    assert!(from_str::<U>("u: 1\n").is_err());
+}
+
+#[test]
+fn bytes_as_int_lists() {
+    // Root must be a map; wrap in a key.
+    let mut m =
+        from_str::<std::collections::BTreeMap<String, Vec<u8>>>("v:\n  - 1\n  - 2\n  - 255\n")
+            .unwrap();
+    assert_eq!(m.remove("v").unwrap(), vec![1u8, 2, 255]);
+    // Serialize bytes back through a wrapper (root must be a mapping).
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct WB {
+        v: Vec<u8>,
+    }
+    let w = WB { v: vec![1u8, 2, 3] };
+    let text = to_string(&w).unwrap();
+    let back: WB = from_str(&text).unwrap();
+    assert_eq!(back, w);
+}
+
+#[test]
+fn enum_error_paths() {
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    enum E {
+        A,
+        B(String),
+    }
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct H {
+        e: E,
+    }
+    // Empty map is not an enum.
+    assert!(from_str::<H>("e: {}\n").is_err());
+    // Multi-entry map is not an externally tagged enum.
+    assert!(from_str::<H>("e:\n  A: 1\n  B: 2\n").is_err());
+    // Scalar int is not an enum.
+    assert!(from_str::<H>("e: 1\n").is_err());
+    // Unit variant where newtype expected.
+    assert!(from_str::<H>("e: \"B\"\n").is_err());
+    // Struct variant paths.
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    enum S {
+        P { x: i32, y: i32 },
+        T(u8, String),
+    }
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct HS {
+        s: S,
+    }
+    let v: HS = from_str("s:\n  P:\n    x: 1\n    y: 2\n").unwrap();
+    assert_eq!(v.s, S::P { x: 1, y: 2 });
+    let v: HS = from_str("s:\n  T:\n    - 7\n    - \"x\"\n").unwrap();
+    assert_eq!(v.s, S::T(7, "x".into()));
+    // Unit variant from null payload.
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    enum N {
+        Nothing,
+    }
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct HN {
+        n: N,
+    }
+    let v: HN = from_str("n:\n  Nothing: null\n").unwrap();
+    assert_eq!(v.n, N::Nothing);
+    assert!(from_str::<HN>("n:\n  Nothing: 1\n").is_err());
+}
+
+#[test]
+fn node_serialize_out_of_range() {
+    use kvd_rs::value::{Node, Shape};
+    // Integer text beyond u64 fails when the target is a serde number.
+    let n = Node::scalar(Shape::Int, "99999999999999999999999");
+    let v: Result<u64, SerdeError> = u64::deserialize(n.into_deserializer());
+    use serde::de::IntoDeserializer;
+    assert!(v.is_err());
+    let _ = n;
+}
+
+#[test]
+fn serde_error_conversions() {
+    use kvd_rs::serde::error::SerdeError;
+    // From io error.
+    let io = std::io::Error::other("boom");
+    let e = SerdeError::from(io);
+    assert!(e.to_string().contains("boom"));
+    // From KVD parse error.
+    let perr = kvd_rs::deserialize::from_str("a: \"x").unwrap_err();
+    let e = SerdeError::from(perr);
+    assert!(!e.to_string().is_empty());
+    // From serialize error (empty key).
+    let serr = kvd_rs::serialize::to_string(&kvd_rs::value::Node::map({
+        let mut m = kvd_rs::value::Map::new();
+        m.insert(
+            "".into(),
+            kvd_rs::value::Node::scalar(kvd_rs::value::Shape::Int, "1"),
+        );
+        m
+    }))
+    .unwrap_err();
+    let e = SerdeError::from(serr);
+    assert!(!e.to_string().is_empty());
+    // float_text rejects non-finite.
+    assert!(kvd_rs::to_string(&f64::NAN).is_err());
+    assert!(kvd_rs::to_string(&f64::INFINITY).is_err());
+}
+
+#[test]
+fn map_key_must_be_string() {
+    // Non-string map keys fail.
+    let mut m = std::collections::BTreeMap::new();
+    m.insert(1u8, "x");
+    assert!(to_string(&m).is_err());
+}
+
+#[test]
+fn tuple_struct_and_newtype_roundtrip() {
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct TS(u8, String, bool);
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct W {
+        t: TS,
+    }
+    let v = from_str::<W>("t:\n  - 7\n  - \"x\"\n  - true\n").unwrap().t;
+    assert_eq!(v, TS(7, "x".into(), true));
+    // Serialize back through wrapper.
+    let w = W {
+        t: TS(7, "x".into(), true),
+    };
+    assert_eq!(to_string(&w).unwrap(), "t:\n  - 7\n  - \"x\"\n  - true\n");
+}
+
+#[test]
+fn all_int_widths_roundtrip() {
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct Widths {
+        a: i8,
+        b: i16,
+        c: i32,
+        d: i64,
+        e: u8,
+        f: u16,
+        g: u32,
+        h: u64,
+        i: f32,
+        j: char,
+    }
+    let w = Widths {
+        a: -8,
+        b: -300,
+        c: -70000,
+        d: -5,
+        e: 250,
+        f: 60000,
+        g: 4000000000,
+        h: 18000000000000000000,
+        i: 1.5,
+        j: 'z',
+    };
+    let text = to_string(&w).unwrap();
+    let back: Widths = from_str(&text).unwrap();
+    assert_eq!(back, w);
+    // Wrong shapes error for each width.
+    assert!(from_str::<Widths>(&text.replace("a: -8", "a: \"x\"")).is_err());
+    assert!(from_str::<Widths>(&text.replace("j: \"z\"", "j: 1")).is_err());
+}
+
+#[test]
+fn serde_wrong_shape_errors() {
+    // bool target from int.
+    assert!(from_str::<bool>("1\n").is_err());
+    // seq target from scalar.
+    assert!(from_str::<Vec<u8>>("1\n").is_err());
+    // map target from scalar.
+    assert!(from_str::<BTreeMap<String, u8>>("1\n").is_err());
+    // f32 via f64 path with bad float text.
+    assert!(from_str::<f64>("\"x\"\n").is_err());
+    // unit struct.
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct Marker;
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct WM {
+        m: Marker,
+    }
+    assert_eq!(from_str::<WM>("m: null\n").unwrap().m, Marker);
+    // newtype struct.
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct N(u32);
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct WN {
+        n: N,
+    }
+    assert_eq!(from_str::<WN>("n: 5\n").unwrap().n, N(5));
+}
+
+#[test]
+fn node_visitor_paths() {
+    use kvd_rs::value::Node;
+    use serde::de::{IntoDeserializer, value::BorrowedStrDeserializer};
+    // Node::deserialize via a foreign deserializer (str).
+    let n = Node::deserialize(BorrowedStrDeserializer::<SerdeError>::new("hi")).unwrap();
+    assert_eq!(n.as_scalar().unwrap().text, "hi");
+    // Via bool / numbers / unit / seq / map.
+    use serde::de::value::{BoolDeserializer, I64Deserializer};
+    let n = Node::deserialize(BoolDeserializer::<SerdeError>::new(true)).unwrap();
+    assert_eq!(n.as_scalar().unwrap().text, "true");
+    let n = Node::deserialize(I64Deserializer::<SerdeError>::new(-3)).unwrap();
+    assert_eq!(n.as_scalar().unwrap().text, "-3");
+    // into_deserializer on &Node.
+    let node = kvd_rs::deserialize::from_str("a: 1\n").unwrap();
+    let v: BTreeMap<String, u8> =
+        serde::Deserialize::deserialize(node.into_deserializer()).unwrap();
+    assert_eq!(v["a"], 1);
+}
+
+#[test]
+fn node_into_foreign_serializer() {
+    use kvd_rs::value::{Map, Node, Shape};
+    use serde::Serializer;
+    // Minimal sink serializer that records what it receives.
+    #[derive(Debug, Default)]
+    struct Sink {
+        out: Vec<String>,
+    }
+    #[derive(Debug)]
+    struct SinkErr(String);
+    impl std::fmt::Display for SinkErr {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.0)
+        }
+    }
+    impl std::error::Error for SinkErr {}
+    impl serde::ser::Error for SinkErr {
+        fn custom<T: std::fmt::Display>(m: T) -> Self {
+            SinkErr(m.to_string())
+        }
+    }
+    impl Serializer for &mut Sink {
+        type Ok = ();
+        type Error = SinkErr;
+        type SerializeSeq = serde::ser::Impossible<(), SinkErr>;
+        type SerializeTuple = serde::ser::Impossible<(), SinkErr>;
+        type SerializeTupleStruct = serde::ser::Impossible<(), SinkErr>;
+        type SerializeTupleVariant = serde::ser::Impossible<(), SinkErr>;
+        type SerializeMap = serde::ser::Impossible<(), SinkErr>;
+        type SerializeStruct = serde::ser::Impossible<(), SinkErr>;
+        type SerializeStructVariant = serde::ser::Impossible<(), SinkErr>;
+        fn serialize_bool(self, v: bool) -> Result<(), SinkErr> {
+            self.out.push(format!("bool:{v}"));
+            Ok(())
+        }
+        fn serialize_i64(self, v: i64) -> Result<(), SinkErr> {
+            self.out.push(format!("i64:{v}"));
+            Ok(())
+        }
+        fn serialize_u64(self, v: u64) -> Result<(), SinkErr> {
+            self.out.push(format!("u64:{v}"));
+            Ok(())
+        }
+        fn serialize_f64(self, v: f64) -> Result<(), SinkErr> {
+            self.out.push(format!("f64:{v}"));
+            Ok(())
+        }
+        fn serialize_str(self, v: &str) -> Result<(), SinkErr> {
+            self.out.push(format!("str:{v}"));
+            Ok(())
+        }
+        fn serialize_none(self) -> Result<(), SinkErr> {
+            self.out.push("none".into());
+            Ok(())
+        }
+        fn serialize_char(self, v: char) -> Result<(), SinkErr> {
+            self.out.push(format!("char:{v}"));
+            Ok(())
+        }
+        fn serialize_bytes(self, v: &[u8]) -> Result<(), SinkErr> {
+            self.out.push(format!("bytes:{}", v.len()));
+            Ok(())
+        }
+        fn serialize_unit(self) -> Result<(), SinkErr> {
+            self.out.push("unit".into());
+            Ok(())
+        }
+        fn serialize_some<T: Serialize + ?Sized>(self, v: &T) -> Result<(), SinkErr> {
+            v.serialize(self)
+        }
+        fn serialize_newtype_struct<T: Serialize + ?Sized>(
+            self,
+            _n: &'static str,
+            v: &T,
+        ) -> Result<(), SinkErr> {
+            v.serialize(self)
+        }
+        fn serialize_seq(
+            self,
+            _l: Option<usize>,
+        ) -> Result<serde::ser::Impossible<(), SinkErr>, SinkErr> {
+            Err(SinkErr("seq".into()))
+        }
+        fn serialize_tuple(
+            self,
+            _l: usize,
+        ) -> Result<serde::ser::Impossible<(), SinkErr>, SinkErr> {
+            Err(SinkErr("tup".into()))
+        }
+        fn serialize_tuple_struct(
+            self,
+            _n: &'static str,
+            _l: usize,
+        ) -> Result<serde::ser::Impossible<(), SinkErr>, SinkErr> {
+            Err(SinkErr("ts".into()))
+        }
+        fn serialize_tuple_variant(
+            self,
+            _n: &'static str,
+            _i: u32,
+            _v: &'static str,
+            _l: usize,
+        ) -> Result<serde::ser::Impossible<(), SinkErr>, SinkErr> {
+            Err(SinkErr("tv".into()))
+        }
+        fn serialize_map(
+            self,
+            _l: Option<usize>,
+        ) -> Result<serde::ser::Impossible<(), SinkErr>, SinkErr> {
+            Err(SinkErr("map".into()))
+        }
+        fn serialize_struct(
+            self,
+            _n: &'static str,
+            _l: usize,
+        ) -> Result<serde::ser::Impossible<(), SinkErr>, SinkErr> {
+            Err(SinkErr("struct".into()))
+        }
+        fn serialize_struct_variant(
+            self,
+            _n: &'static str,
+            _i: u32,
+            _v: &'static str,
+            _l: usize,
+        ) -> Result<serde::ser::Impossible<(), SinkErr>, SinkErr> {
+            Err(SinkErr("sv".into()))
+        }
+        fn serialize_unit_struct(self, _n: &'static str) -> Result<(), SinkErr> {
+            self.out.push("unit_struct".into());
+            Ok(())
+        }
+        fn serialize_unit_variant(
+            self,
+            _n: &'static str,
+            _i: u32,
+            v: &'static str,
+        ) -> Result<(), SinkErr> {
+            self.out.push(format!("unit_variant:{v}"));
+            Ok(())
+        }
+        fn serialize_newtype_variant<T: Serialize + ?Sized>(
+            self,
+            _n: &'static str,
+            _i: u32,
+            _v: &'static str,
+            _x: &T,
+        ) -> Result<(), SinkErr> {
+            Err(SinkErr("ntv".into()))
+        }
+        fn serialize_i8(self, v: i8) -> Result<(), SinkErr> {
+            self.serialize_i64(v as i64)
+        }
+        fn serialize_i16(self, v: i16) -> Result<(), SinkErr> {
+            self.serialize_i64(v as i64)
+        }
+        fn serialize_i32(self, v: i32) -> Result<(), SinkErr> {
+            self.serialize_i64(v as i64)
+        }
+        fn serialize_u8(self, v: u8) -> Result<(), SinkErr> {
+            self.serialize_u64(v as u64)
+        }
+        fn serialize_u16(self, v: u16) -> Result<(), SinkErr> {
+            self.serialize_u64(v as u64)
+        }
+        fn serialize_u32(self, v: u32) -> Result<(), SinkErr> {
+            self.serialize_u64(v as u64)
+        }
+        fn serialize_f32(self, v: f32) -> Result<(), SinkErr> {
+            self.serialize_f64(v as f64)
+        }
+    }
+    use serde::Serialize;
+    let mut sink = Sink::default();
+    Node::scalar(Shape::Str, "hi").serialize(&mut sink).unwrap();
+    Node::scalar(Shape::Int, "42").serialize(&mut sink).unwrap();
+    // Fits u64 but not i64: exercises the u64 fallback.
+    Node::scalar(Shape::Int, "17000000000000000000")
+        .serialize(&mut sink)
+        .unwrap();
+    Node::scalar(Shape::Float, "0.5")
+        .serialize(&mut sink)
+        .unwrap();
+    Node::scalar(Shape::Bool, "true")
+        .serialize(&mut sink)
+        .unwrap();
+    Node::scalar(Shape::Null, "null")
+        .serialize(&mut sink)
+        .unwrap();
+    assert_eq!(
+        sink.out,
+        vec![
+            "str:hi",
+            "i64:42",
+            "u64:17000000000000000000",
+            "f64:0.5",
+            "bool:true",
+            "none"
+        ]
+    );
+    // Out-of-range int and bad float error.
+    let mut sink = Sink::default();
+    assert!(
+        Node::scalar(Shape::Int, "99999999999999999999999")
+            .serialize(&mut sink)
+            .is_err()
+    );
+    assert!(
+        Node::scalar(Shape::Float, "abc")
+            .serialize(&mut sink)
+            .is_err()
+    );
+    // Map/list route through serialize_map/serialize_seq (Impossible errors).
+    let mut m = Map::new();
+    m.insert("a".into(), Node::scalar(Shape::Int, "1"));
+    assert!(Node::map(m).serialize(&mut sink).is_err());
+    assert!(
+        Node::list(vec![Node::scalar(Shape::Int, "1")])
+            .serialize(&mut sink)
+            .is_err()
+    );
+}
+
+#[test]
+fn tuple_variant_and_bytes_serialize() {
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    enum E {
+        T(u8, String),
+        S { x: i32 },
+    }
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct W {
+        e: E,
+    }
+    let w = W {
+        e: E::T(7, "x".into()),
+    };
+    let text = to_string(&w).unwrap();
+    assert_eq!(from_str::<W>(&text).unwrap(), w);
+    let w = W { e: E::S { x: 3 } };
+    let text = to_string(&w).unwrap();
+    assert_eq!(from_str::<W>(&text).unwrap(), w);
+    // f32, char, bytes, unit struct, newtype via NodeSerializer directly.
+    use kvd_rs::serde::serialize::NodeSerializer;
+    let n = 1.5f32.serialize(NodeSerializer).unwrap();
+    assert_eq!(n.as_scalar().unwrap().text, "1.5");
+    let n = 'q'.serialize(NodeSerializer).unwrap();
+    assert_eq!(n.as_scalar().unwrap().text, "q");
+    let n = serde::Serialize::serialize(&b"hi"[..], NodeSerializer).unwrap();
+    assert_eq!(n.as_list().unwrap().len(), 2);
+    #[derive(Debug, Serialize)]
+    struct US;
+    let n = US.serialize(NodeSerializer).unwrap();
+    assert_eq!(n.as_scalar().unwrap().shape, kvd_rs::value::Shape::Null);
+}
+
+#[test]
+fn serde_describe_and_shape_errors() {
+    use kvd_rs::value::{Node, Shape};
+    use serde::de::IntoDeserializer;
+    // describe() arms via invalid_type: float shape where bool expected.
+    let node = Node::scalar(Shape::Float, "0.5");
+    assert!(bool::deserialize(node.into_deserializer()).is_err());
+    // null shape where bool expected.
+    let node = Node::scalar(Shape::Null, "null");
+    assert!(bool::deserialize(node.into_deserializer()).is_err());
+    // map shape where bool expected.
+    let node = kvd_rs::deserialize::from_str("a: 1\n").unwrap();
+    assert!(bool::deserialize(node.into_deserializer()).is_err());
+    // list shape where bool expected.
+    let node = Node::list(vec![Node::scalar(Shape::Int, "1")]);
+    assert!(bool::deserialize(node.into_deserializer()).is_err());
+    // visit_by_shape bool arm with bad text (unreachable via parser, but
+    // reachable by constructing the node directly).
+    let node = Node::scalar(Shape::Bool, "yes");
+    assert!(bool::deserialize(node.into_deserializer()).is_err());
+    // visit_by_shape float arm with unparseable text.
+    let node = Node::scalar(Shape::Float, "abc");
+    assert!(f64::deserialize(node.into_deserializer()).is_err());
+    // i64 overflow via huge literal.
+    let node = Node::scalar(Shape::Int, "99999999999999999999999");
+    assert!(i64::deserialize(node.into_deserializer()).is_err());
+    // u64 negative.
+    let node = Node::scalar(Shape::Int, "-5");
+    assert!(u64::deserialize(node.into_deserializer()).is_err());
+    // char with multi-char string.
+    assert!(char::deserialize(Node::scalar(Shape::Str, "xy").into_deserializer()).is_err());
+    // unit variant payload errors: newtype/tuple/struct on unit variant.
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    enum E {
+        A(u8),
+        T(u8, u8),
+        S { x: u8 },
+    }
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    struct H {
+        e: E,
+    }
+    assert!(from_str::<H>("e: \"A\"\n").is_err());
+    assert!(from_str::<H>("e: \"T\"\n").is_err());
+    assert!(from_str::<H>("e: \"S\"\n").is_err());
+    // StrDe enum path (nested enums unsupported).
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    struct HE {
+        e: E,
+    }
+    let _ = HE { e: E::A(1) };
+    // MapDe pending panic path is unreachable by construction; skip.
+    // NodeVisitor remaining arms via serde_json-less round trip through Node.
+    let n: Node =
+        serde::Deserialize::deserialize(serde::de::value::U64Deserializer::<SerdeError>::new(7))
+            .unwrap();
+    assert_eq!(n.as_scalar().unwrap().text, "7");
+    let n: Node =
+        serde::Deserialize::deserialize(serde::de::value::F64Deserializer::<SerdeError>::new(0.5))
+            .unwrap();
+    assert_eq!(n.as_scalar().unwrap().text, "0.5");
+    let n: Node = serde::Deserialize::deserialize(
+        serde::de::value::BoolDeserializer::<SerdeError>::new(false),
+    )
+    .unwrap();
+    assert_eq!(n.as_scalar().unwrap().text, "false");
+}

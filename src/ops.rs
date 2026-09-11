@@ -731,8 +731,16 @@ mod tests {
 
     #[test]
     fn op_error_display() {
-        assert!(OpError::BadPath("x".into()).to_string().contains("bad path"));
-        assert!(OpError::MissingKey("k".into()).to_string().contains("missing key"));
+        assert!(
+            OpError::BadPath("x".into())
+                .to_string()
+                .contains("bad path")
+        );
+        assert!(
+            OpError::MissingKey("k".into())
+                .to_string()
+                .contains("missing key")
+        );
         assert!(OpError::IndexOutOfBounds(3).to_string().contains("3"));
         assert_eq!(OpError::NotAMap.to_string(), "expected a map");
         assert_eq!(OpError::NotAList.to_string(), "expected a list");
