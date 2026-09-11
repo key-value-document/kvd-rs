@@ -192,13 +192,7 @@ impl Parser {
                     }
                     // The subtree hangs off the pair's leaf, `segs.len()`
                     // levels below this pair's own depth slot.
-                    if l.is_marker() {
-                        Node::List(self.parse_items(child, depth + segs.len())?)
-                    } else if l.is_dict_marker() {
-                        Node::Dict(self.parse_entries(child, depth + segs.len())?)
-                    } else {
-                        Node::Map(self.parse_pairs(child, depth + segs.len())?)
-                    }
+                    self.parse_subtree(child, depth + segs.len())?
                 }
             }
         } else if let Some(v) = stripped[after..].strip_prefix(' ') {
@@ -210,18 +204,7 @@ impl Parser {
                     "expected exactly one space after ':'",
                 ));
             }
-            match v {
-                "\"\"\"" => Node::Scalar(self.read_triple(keycol)?),
-                _ if v.starts_with("\"\"\"") => {
-                    return Err(error(
-                        ErrorKind::UnexpectedCharacter,
-                        line_no,
-                        value_col + 1,
-                        "triple-quoted string must start on its own line",
-                    ));
-                }
-                _ => self.scalar_from_token(v, line_no, value_col + 1)?,
-            }
+            self.parse_inline_value(v, keycol, line_no, value_col)?
         } else {
             return Err(error(
                 ErrorKind::UnexpectedCharacter,
@@ -283,19 +266,13 @@ impl Parser {
             } else if content == "-" || content.starts_with("- ") {
                 // Compact nested list (`- - x`): rewrite the line so the
                 // inner marker stands alone at indent + 2, then recurse.
-                let inner = self.lines[self.pos].rest[2..].to_string();
-                let slot = &mut self.lines[self.pos];
-                slot.indent += 2;
-                slot.rest = inner;
+                self.rewrite_inline_marker();
                 items.push(Node::List(self.parse_items(indent + 2, depth + 1)?));
             } else if content == "=" || content.starts_with("= ") {
                 // Compact nested dict (`- = "k": v`): rewrite the line so
                 // the entry marker stands alone at indent + 2, then parse
                 // entries (spec §4 `'- ' entries`).
-                let inner = self.lines[self.pos].rest[2..].to_string();
-                let slot = &mut self.lines[self.pos];
-                slot.indent += 2;
-                slot.rest = inner;
+                self.rewrite_inline_marker();
                 items.push(Node::Dict(self.parse_entries(indent + 2, depth + 1)?));
             } else if content == "\"\"\"" {
                 // Triple-quoted string as a list item (spec §5): content
@@ -306,10 +283,7 @@ impl Parser {
                 // Inline first pair of a mapping item: rewrite the line so
                 // the pair starts at its real column, parse it, then consume
                 // continuation pairs aligned to that column.
-                let inner = self.lines[self.pos].rest[2..].to_string();
-                let slot = &mut self.lines[self.pos];
-                slot.indent += 2;
-                slot.rest = inner;
+                self.rewrite_inline_marker();
                 let keycol = indent + 2;
                 let (path, value) = self.parse_pair(keycol, depth + 1)?;
                 let mut map = Map::new();
@@ -347,6 +321,50 @@ impl Parser {
         Ok(items)
     }
 
+    /// Rewrites a `- content` line so the content stands alone at
+    /// indent + 2 (used for compact `- - x`, `- = "k": v`, and inline
+    /// `- pair:` forms).
+    fn rewrite_inline_marker(&mut self) {
+        let inner = self.lines[self.pos].rest[2..].to_string();
+        let slot = &mut self.lines[self.pos];
+        slot.indent += 2;
+        slot.rest = inner;
+    }
+
+    /// Parses an inline value after `key: `: a `"""` block, a scalar token,
+    /// or an error for a misplaced triple opener.
+    fn parse_inline_value(
+        &mut self,
+        v: &str,
+        keycol: usize,
+        line_no: usize,
+        value_col: usize,
+    ) -> Result<Node> {
+        match v {
+            "\"\"\"" => Ok(Node::Scalar(self.read_triple(keycol)?)),
+            _ if v.starts_with("\"\"\"") => Err(error(
+                ErrorKind::UnexpectedCharacter,
+                line_no,
+                value_col + 1,
+                "triple-quoted string must start on its own line",
+            )),
+            _ => self.scalar_from_token(v, line_no, value_col + 1),
+        }
+    }
+
+    /// Parses an indented subtree (list, dict, or mapping) starting at
+    /// `child`, dispatching on the next line's marker.
+    fn parse_subtree(&mut self, child: usize, depth: usize) -> Result<Node> {
+        let l = self.peek().expect("caller checked a subtree line exists");
+        if l.is_marker() {
+            Ok(Node::List(self.parse_items(child, depth)?))
+        } else if l.is_dict_marker() {
+            Ok(Node::Dict(self.parse_entries(child, depth)?))
+        } else {
+            Ok(Node::Map(self.parse_pairs(child, depth)?))
+        }
+    }
+
     /// Parses the item introduced by a bare `-` marker: either an indented
     /// mapping or an indented nested list on the following lines.
     fn parse_bare_item(&mut self, indent: usize, line_no: usize, depth: usize) -> Result<Node> {
@@ -366,13 +384,7 @@ impl Parser {
                 format!("item content must be indented to column {}", indent + 3),
             ));
         }
-        if l.is_marker() {
-            Ok(Node::List(self.parse_items(child, depth + 1)?))
-        } else if l.is_dict_marker() {
-            Ok(Node::Dict(self.parse_entries(child, depth + 1)?))
-        } else {
-            Ok(Node::Map(self.parse_pairs(child, depth + 1)?))
-        }
+        self.parse_subtree(child, depth + 1)
     }
 
     /// Parses consecutive dict entries (`= "k": value`) whose markers
@@ -528,13 +540,7 @@ impl Parser {
                             format!("nesting exceeds the maximum depth of {}", crate::MAX_DEPTH),
                         ));
                     }
-                    if l.is_marker() {
-                        Node::List(self.parse_items(child, depth + 1)?)
-                    } else if l.is_dict_marker() {
-                        Node::Dict(self.parse_entries(child, depth + 1)?)
-                    } else {
-                        Node::Map(self.parse_pairs(child, depth + 1)?)
-                    }
+                    self.parse_subtree(child, depth + 1)?
                 }
             }
         } else if let Some(v) = after_colon.strip_prefix(' ') {
@@ -546,18 +552,7 @@ impl Parser {
                     "expected exactly one space after ':'",
                 ));
             }
-            match v {
-                "\"\"\"" => Node::Scalar(self.read_triple(keycol)?),
-                _ if v.starts_with("\"\"\"") => {
-                    return Err(error(
-                        ErrorKind::UnexpectedCharacter,
-                        line_no,
-                        value_col + 1,
-                        "triple-quoted string must start on its own line",
-                    ));
-                }
-                _ => self.scalar_from_token(v, line_no, value_col + 1)?,
-            }
+            self.parse_inline_value(v, keycol, line_no, value_col)?
         } else {
             return Err(error(
                 ErrorKind::UnexpectedCharacter,
@@ -580,7 +575,14 @@ impl Parser {
     ///
     /// Escapes are processed per content line (same rules as `"..."`).
     fn read_triple(&mut self, keycol: usize) -> Result<Scalar> {
-        let mut content: Vec<(String, usize, usize)> = Vec::new();
+        /// One collected `"""` content line: raw text plus its source
+        /// position for escape-error reporting.
+        struct ContentLine {
+            raw: String,
+            line_no: usize,
+            indent: usize,
+        }
+        let mut content: Vec<ContentLine> = Vec::new();
         let mut trailing_nl = false;
         let mut i = self.pos;
         loop {
@@ -596,7 +598,11 @@ impl Parser {
             // Blank lines are kept as empty content; their indent=0 must be
             // checked before the indent guard below.
             if l.rest.trim().is_empty() {
-                content.push((String::new(), l.no, l.indent));
+                content.push(ContentLine {
+                    raw: String::new(),
+                    line_no: l.no,
+                    indent: l.indent,
+                });
                 i += 1;
                 continue;
             }
@@ -620,28 +626,36 @@ impl Parser {
             if l.rest.trim_end().ends_with("\"\"\"") {
                 let raw = &l.raw;
                 let closer_pos = raw.rfind("\"\"\"").expect("just confirmed");
-                content.push((raw[..closer_pos].to_string(), l.no, l.indent));
+                content.push(ContentLine {
+                    raw: raw[..closer_pos].to_string(),
+                    line_no: l.no,
+                    indent: l.indent,
+                });
                 self.pos = i + 1;
                 break;
             }
-            content.push((l.raw.clone(), l.no, l.indent));
+            content.push(ContentLine {
+                raw: l.raw.clone(),
+                line_no: l.no,
+                indent: l.indent,
+            });
             i += 1;
         }
 
         let common = content
             .iter()
-            .filter(|(raw, _, _)| !raw.is_empty())
-            .map(|(raw, _, _)| raw.len() - raw.trim_start_matches(' ').len())
+            .filter(|line| !line.raw.is_empty())
+            .map(|line| line.raw.len() - line.raw.trim_start_matches(' ').len())
             .min()
             .unwrap_or(0);
         let body: Vec<String> = content
             .iter()
-            .map(|(raw, no, indent)| {
-                if raw.is_empty() {
+            .map(|line| {
+                if line.raw.is_empty() {
                     Ok(String::new())
                 } else {
-                    let stripped = &raw[common.min(raw.len())..];
-                    scan_escapes(stripped, *no, *indent + 1 + common)
+                    let stripped = &line.raw[common.min(line.raw.len())..];
+                    scan_escapes(stripped, line.line_no, line.indent + 1 + common)
                 }
             })
             .collect::<Result<Vec<String>>>()?;

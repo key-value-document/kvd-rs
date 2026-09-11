@@ -80,31 +80,46 @@ fn emit_pair(
     depth: usize,
     out: &mut String,
 ) -> Result<(), SerializeError> {
-    let key = quote_key(key)?;
+    let prefix = format!("{}{}", " ".repeat(keycol), quote_key(key)?);
+    emit_keyed_value(&prefix, node, keycol + 2, keycol, depth, out)
+}
+
+/// Emits one `key: value` pair with a preformatted header prefix
+/// (e.g. `"  key"`, `"  - key"`, `"  = \"k\""`, `"  - = \"k\""`).
+/// `sub_indent` is where a subtree hangs; `scalar_col` is the content
+/// column for inline scalars (also the `"""` closer column).
+fn emit_keyed_value(
+    prefix: &str,
+    node: &Node,
+    sub_indent: usize,
+    scalar_col: usize,
+    depth: usize,
+    out: &mut String,
+) -> Result<(), SerializeError> {
     match node {
         Node::Map(m) => {
             if m.is_empty() {
-                writeln!(out, "{}{}: {{}}", " ".repeat(keycol), key)?;
+                writeln!(out, "{prefix}: {{}}")?;
             } else {
-                writeln!(out, "{}{}:", " ".repeat(keycol), key)?;
-                emit_map(m, keycol + 2, depth + 1, out)?;
+                writeln!(out, "{prefix}:")?;
+                emit_map(m, sub_indent, depth + 1, out)?;
             }
         }
         Node::Dict(m) => {
-            writeln!(out, "{}{}:", " ".repeat(keycol), key)?;
-            emit_dict(m, keycol + 2, depth + 1, out)?;
+            writeln!(out, "{prefix}:")?;
+            emit_dict(m, sub_indent, depth + 1, out)?;
         }
         Node::List(items) => {
             if items.is_empty() {
-                writeln!(out, "{}{}: []", " ".repeat(keycol), key)?;
+                writeln!(out, "{prefix}: []")?;
             } else {
-                writeln!(out, "{}{}:", " ".repeat(keycol), key)?;
-                emit_list(items, keycol + 2, depth + 1, out)?;
+                writeln!(out, "{prefix}:")?;
+                emit_list(items, sub_indent, depth + 1, out)?;
             }
         }
-        Node::Scalar(s) => {
-            write!(out, "{}{}: ", " ".repeat(keycol), key)?;
-            write_scalar_value(s, keycol, keycol, out)?;
+        Node::Scalar(sc) => {
+            write!(out, "{prefix}: ")?;
+            write_scalar_value(sc, scalar_col, scalar_col, out)?;
             writeln!(out)?;
         }
     }
@@ -138,41 +153,12 @@ fn emit_entry(
     depth: usize,
     out: &mut String,
 ) -> Result<(), SerializeError> {
-    let entry_col = indent + 2;
     // Dict keys are opaque and always double-quoted (spec §8.2).
-    let qkey = escape(key);
+    let prefix = format!("{pad}= {}", escape(key));
     // Subtrees hang off the entry marker: two past `indent` (like a bare
     // `-` item's content), not two past the key. The key is inline on the
     // marker line, so `= "k":` at indent 2 nests `- x` at indent 4.
-    let sub = indent + 2;
-    match node {
-        Node::Map(m) => {
-            if m.is_empty() {
-                writeln!(out, "{pad}= {qkey}: {{}}")?;
-            } else {
-                writeln!(out, "{pad}= {qkey}:")?;
-                emit_map(m, sub, depth + 1, out)?;
-            }
-        }
-        Node::Dict(m) => {
-            writeln!(out, "{pad}= {qkey}:")?;
-            emit_dict(m, sub, depth + 1, out)?;
-        }
-        Node::List(items) => {
-            if items.is_empty() {
-                writeln!(out, "{pad}= {qkey}: []")?;
-            } else {
-                writeln!(out, "{pad}= {qkey}:")?;
-                emit_list(items, sub, depth + 1, out)?;
-            }
-        }
-        Node::Scalar(s) => {
-            write!(out, "{pad}= {qkey}: ")?;
-            write_scalar_value(s, entry_col, entry_col, out)?;
-            writeln!(out)?;
-        }
-    }
-    Ok(())
+    emit_keyed_value(&prefix, node, indent + 2, indent + 2, depth, out)
 }
 
 /// Emits a list whose `-` markers start at `indent`. `depth` is the
@@ -246,39 +232,8 @@ fn emit_inline_pair(
     pad: &str,
     depth: usize,
 ) -> Result<(), SerializeError> {
-    let key = quote_key(key)?;
-    match node {
-        Node::Map(m) => {
-            if m.is_empty() {
-                writeln!(out, "{}- {}: {{}}", pad, key)?;
-            } else {
-                writeln!(out, "{}- {}:", pad, key)?;
-                emit_map(m, keycol + 2, depth + 1, out)?;
-            }
-        }
-        Node::List(items) => {
-            if items.is_empty() {
-                writeln!(out, "{}- {}: []", pad, key)?;
-            } else {
-                writeln!(out, "{}- {}:", pad, key)?;
-                emit_list(items, keycol + 2, depth + 1, out)?;
-            }
-        }
-        Node::Dict(m) => {
-            if m.is_empty() {
-                writeln!(out, "{}- {}: {{}}", pad, key)?;
-            } else {
-                writeln!(out, "{}- {}:", pad, key)?;
-                emit_dict(m, keycol + 2, depth + 1, out)?;
-            }
-        }
-        Node::Scalar(s) => {
-            write!(out, "{}- {}: ", pad, key)?;
-            write_scalar_value(s, keycol, keycol, out)?;
-            writeln!(out)?;
-        }
-    }
-    Ok(())
+    let prefix = format!("{pad}- {}", quote_key(key)?);
+    emit_keyed_value(&prefix, node, keycol + 2, keycol, depth, out)
 }
 
 /// Emits the first dict entry of a list-item dict, inlined after the `-`
@@ -291,37 +246,10 @@ fn emit_inline_entry(
     pad: &str,
     depth: usize,
 ) -> Result<(), SerializeError> {
-    let qkey = escape(key);
+    let prefix = format!("{pad}- = {}", escape(key));
     // `entry_col` is the rewritten `=` marker column (two past the `-`),
     // so subtrees sit two past it — mirroring `parse_entry`.
-    match node {
-        Node::Map(m) => {
-            if m.is_empty() {
-                writeln!(out, "{pad}- = {qkey}: {{}}")?;
-            } else {
-                writeln!(out, "{pad}- = {qkey}:")?;
-                emit_map(m, entry_col + 2, depth + 1, out)?;
-            }
-        }
-        Node::Dict(m) => {
-            writeln!(out, "{pad}- = {qkey}:")?;
-            emit_dict(m, entry_col + 2, depth + 1, out)?;
-        }
-        Node::List(items) => {
-            if items.is_empty() {
-                writeln!(out, "{pad}- = {qkey}: []")?;
-            } else {
-                writeln!(out, "{pad}- = {qkey}:")?;
-                emit_list(items, entry_col + 2, depth + 1, out)?;
-            }
-        }
-        Node::Scalar(s) => {
-            write!(out, "{pad}- = {qkey}: ")?;
-            write_scalar_value(s, entry_col, entry_col, out)?;
-            writeln!(out)?;
-        }
-    }
-    Ok(())
+    emit_keyed_value(&prefix, node, entry_col + 2, entry_col, depth, out)
 }
 
 /// Writes a scalar's value (after the `key: ` / `- ` prefix already

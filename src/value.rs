@@ -342,7 +342,8 @@ impl Node {
     /// Errors if this node is not keyed (e.g. it is a scalar or a list),
     /// or if `key` is absent. Use [`Node::get_opt`] when a missing key
     /// should yield `None` instead of an error. For errors that name the
-    /// full navigation chain (e.g. `a.b.c`), use [`Node::get_path`].
+    /// full navigation chain (e.g. `a.b.c`), use [`crate::ops::get`] with a
+    /// parsed [`crate::ops::Path`].
     pub fn get(&self, key: &str) -> Result<&Node> {
         let map = self.as_keyed().ok_or_else(|| {
             Error::new(
@@ -395,132 +396,10 @@ impl Node {
     pub fn get_opt_mut(&mut self, key: &str) -> Option<&mut Node> {
         self.as_keyed_mut().and_then(|m| m.get_mut(key))
     }
-
-    /// Navigates a full key path (e.g. `["a", "b", "c"]`) through nested
-    /// keyed nodes (maps and dicts), returning the deepest node. The error
-    /// message carries the full chain, e.g. `a.b.c: key not found` or
-    /// `d.e.f: node is not a map`.
-    pub fn get_path(&self, path: &[&str]) -> Result<&Node> {
-        self.get_path_inner(path.iter().copied(), "")
-    }
-
-    /// Like [`Node::get_path`], but accepts a dotted path string (`"a.b.c"`),
-    /// splitting on `.` per the crate's path convention.
-    pub fn get_path_str(&self, path: &str) -> Result<&Node> {
-        let keys: Vec<&str> = path.split('.').collect();
-        self.get_path(&keys)
-    }
-
-    /// Like [`Node::get_path`], but returns `None` instead of erroring when
-    /// any segment is missing or a non-map node is indexed.
-    pub fn get_path_opt(&self, path: &[&str]) -> Option<&Node> {
-        self.get_path(path).ok()
-    }
-
-    /// Like [`Node::get_path_str`], but returns `None` on any failure.
-    pub fn get_path_str_opt(&self, path: &str) -> Option<&Node> {
-        self.get_path_str(path).ok()
-    }
-
-    /// Mutable counterpart of [`Node::get_path`].
-    pub fn get_path_mut(&mut self, path: &[&str]) -> Result<&mut Node> {
-        self.get_path_mut_inner(path.iter().copied(), "")
-    }
-
-    /// Mutable counterpart of [`Node::get_path_str`].
-    pub fn get_path_str_mut(&mut self, path: &str) -> Result<&mut Node> {
-        let keys: Vec<&str> = path.split('.').collect();
-        self.get_path_mut(&keys)
-    }
-
-    /// Mutable counterpart of [`Node::get_path_opt`].
-    pub fn get_path_opt_mut(&mut self, path: &[&str]) -> Option<&mut Node> {
-        self.get_path_mut(path).ok()
-    }
-
-    /// Mutable counterpart of [`Node::get_path_str_opt`].
-    pub fn get_path_str_opt_mut(&mut self, path: &str) -> Option<&mut Node> {
-        self.get_path_str_mut(path).ok()
-    }
-
-    fn get_path_inner<'a, I>(&self, mut path: I, prefix: &str) -> Result<&Node>
-    where
-        I: Iterator<Item = &'a str>,
-    {
-        match path.next() {
-            None => Ok(self),
-            Some(key) => {
-                let here = join_path(prefix, key);
-                let map = self.as_keyed().ok_or_else(|| {
-                    let loc = if prefix.is_empty() {
-                        "root".to_string()
-                    } else {
-                        prefix.to_string()
-                    };
-                    Error::new(
-                        ErrorKind::NotAMap,
-                        0,
-                        0,
-                        format!("{loc} is {}; cannot index `{key}`", non_map_kind(self)),
-                    )
-                })?;
-                let child = map.get(key).ok_or_else(|| {
-                    Error::new(
-                        ErrorKind::KeyNotFound,
-                        0,
-                        0,
-                        format!("{here}: key not found"),
-                    )
-                })?;
-                child.get_path_inner(path, &here)
-            }
-        }
-    }
-
-    fn get_path_mut_inner<'a, I>(&mut self, mut path: I, prefix: &str) -> Result<&mut Node>
-    where
-        I: Iterator<Item = &'a str>,
-    {
-        match path.next() {
-            None => Ok(self),
-            Some(key) => {
-                let here = join_path(prefix, key);
-                // Check shape with a transient immutable borrow so the error
-                // branch can describe `self` without conflicting with the
-                // mutable descent below.
-                if self.as_keyed().is_none() {
-                    let loc = if prefix.is_empty() {
-                        "root".to_string()
-                    } else {
-                        prefix.to_string()
-                    };
-                    return Err(Error::new(
-                        ErrorKind::NotAMap,
-                        0,
-                        0,
-                        format!("{loc} is {}; cannot index `{key}`", non_map_kind(self)),
-                    ));
-                }
-                let map = self.as_keyed_mut().unwrap();
-                let child = match map.get_mut(key) {
-                    Some(child) => child,
-                    None => {
-                        return Err(Error::new(
-                            ErrorKind::KeyNotFound,
-                            0,
-                            0,
-                            format!("{here}: key not found"),
-                        ));
-                    }
-                };
-                child.get_path_mut_inner(path, &here)
-            }
-        }
-    }
 }
 
 /// Joins a path prefix with one more key using the crate's dotted convention.
-fn join_path(prefix: &str, key: &str) -> String {
+pub(crate) fn join_path(prefix: &str, key: &str) -> String {
     if prefix.is_empty() {
         key.to_string()
     } else {
@@ -722,48 +601,5 @@ mod tests {
         // get_opt yields None for non-map and missing key
         assert!(port_node.get_opt("x").is_none());
         assert!(root.get("app").unwrap().get_opt("missing").is_none());
-    }
-
-    #[test]
-    fn node_get_path_reports_chain() {
-        let mut app = Node::map(Map::new());
-        app.as_map_mut()
-            .unwrap()
-            .insert("port".into(), Node::scalar(Shape::Int, "8080"));
-        let mut root = Node::map(Map::new());
-        root.as_map_mut().unwrap().insert("app".into(), app);
-
-        // full chain resolves (slice and dotted forms agree)
-        assert_eq!(
-            root.get_path(&["app", "port"])
-                .unwrap()
-                .as_scalar()
-                .unwrap()
-                .text,
-            "8080"
-        );
-        assert_eq!(
-            root.get_path_str("app.port")
-                .unwrap()
-                .as_scalar()
-                .unwrap()
-                .text,
-            "8080"
-        );
-
-        // missing key reports the full chain
-        let e = root.get_path(&["app", "missing"]).unwrap_err();
-        assert_eq!(e.kind, ErrorKind::KeyNotFound);
-        assert!(e.message.starts_with("app.missing:"), "got: {}", e.message);
-
-        // indexing into a scalar reports the chain up to the scalar
-        let e = root.get_path(&["app", "port", "x"]).unwrap_err();
-        assert_eq!(e.kind, ErrorKind::NotAMap);
-        assert!(e.message.contains("app.port"), "got: {}", e.message);
-        assert!(e.message.contains("scalar"), "got: {}", e.message);
-
-        // optional variants yield None
-        assert!(root.get_path_opt(&["app", "missing"]).is_none());
-        assert!(root.get_path_str_opt("app.port.x").is_none());
     }
 }

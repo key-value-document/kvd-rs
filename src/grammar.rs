@@ -6,29 +6,49 @@
 
 /// `[A-Za-z0-9] | [A-Za-z0-9] [A-Za-z0-9_-]* [A-Za-z0-9]` (spec §3 `key`).
 pub fn is_key(s: &str) -> bool {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_alphanumeric() => {}
-        _ => return false,
-    }
-    let mut last = None;
-    for c in chars {
-        if !(c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-            return false;
-        }
-        last = Some(c);
-    }
-    last.is_none_or(|c| c.is_ascii_alphanumeric())
+    word(
+        s,
+        |c: char| c.is_ascii_alphanumeric(),
+        |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-',
+        true,
+    )
 }
 
 /// `[a-z] [a-z0-9_-]*` (spec §3 `type`; forced lowercase).
 pub fn is_type_name(s: &str) -> bool {
+    word(
+        s,
+        |c: char| c.is_ascii_lowercase(),
+        |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_',
+        false,
+    )
+}
+
+/// Shared shape for bare-word grammars: a constrained first char, then
+/// constrained rest chars. When `ends_alnum` is set, the last char must
+/// also be alphanumeric (keys); otherwise trailing `-`/`_` are allowed.
+fn word(
+    s: &str,
+    first_ok: impl Fn(char) -> bool,
+    rest_ok: impl Fn(char) -> bool,
+    ends_alnum: bool,
+) -> bool {
     let mut chars = s.chars();
     match chars.next() {
-        Some(c) if c.is_ascii_lowercase() => {}
+        Some(c) if first_ok(c) => {}
         _ => return false,
     }
-    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    let mut last = None;
+    for c in chars {
+        if !rest_ok(c) {
+            return false;
+        }
+        last = Some(c);
+    }
+    match last {
+        None => true,
+        Some(c) => !ends_alnum || c.is_ascii_alphanumeric(),
+    }
 }
 
 /// The six builtin type names (`int`, `float`, `bool`, `str`, `list`,
@@ -61,37 +81,24 @@ pub fn is_int(s: &str) -> bool {
     if !(b'1'..=b'9').contains(&bytes[0]) {
         return false;
     }
-    if !bytes.contains(&b'_') {
-        return bytes.iter().all(|b| b.is_ascii_digit());
+    let Ok(digits) = core::str::from_utf8(bytes) else {
+        return false;
+    };
+    if !digits.contains('_') {
+        return digits.bytes().all(|b| b.is_ascii_digit());
     }
-    // Strict thousands groups: 1-3 digits, then `_` + exactly 3 digits.
-    let mut i = 0;
-    let mut run = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'_' {
-            if run == 0 || run > 3 {
-                return false;
-            }
-            if i + 3 >= bytes.len() {
-                return false;
-            }
-            if !bytes[i + 1..i + 4].iter().all(|b| b.is_ascii_digit()) {
-                return false;
-            }
-            i += 4;
-            run = 3;
-            if i < bytes.len() && bytes[i] != b'_' {
-                return false;
-            }
-            continue;
-        }
-        if !bytes[i].is_ascii_digit() {
+    // Strict thousands groups: 1-3 leading digits, then `_` + exactly 3.
+    let mut groups = digits.split('_');
+    let first = groups.next().unwrap_or("");
+    if !(1..=3).contains(&first.len()) || !first.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    for g in groups {
+        if g.len() != 3 || !g.bytes().all(|b| b.is_ascii_digit()) {
             return false;
         }
-        run += 1;
-        i += 1;
     }
-    run <= 3
+    true
 }
 
 /// `[+-]?0\.[0-9]+([eE][+-]?[0-9]+)? | [+-]?[1-9][0-9]*\.[0-9]+([eE][+-]?[0-9]+)? |
