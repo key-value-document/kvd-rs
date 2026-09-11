@@ -4,8 +4,7 @@
 //! a schema. A standalone schema document is ordinary KVD whose values are
 //! builtin scalar type names (`int`, `float`, `bool`, `str`), container type
 //! names (`list`, `dict`) inside a `type:` descriptor, or the `{}` / `[]`
-//! literals — a bare tree mirroring the data's structure, with no
-//! metakeys (`__schema__` belongs in data documents only, spec §4). A
+//! literals — a bare tree mirroring the data's structure (spec §4). A
 //! one-item list declares the element type for every item of the
 //! corresponding data list. Descriptors may carry `optional: true` and a
 //! `validation` block with ranges, lengths, and patterns (spec §10).
@@ -39,7 +38,7 @@ fn regex_for_pattern(pattern: &str) -> Result<regex::Regex, regex::Error> {
 }
 
 /// One verification failure, located by the dotted path of the offending
-/// value (`app.port`, `endpoints[0].method`, `__schema__.pem`).
+/// value (`app.port`, `endpoints[0].method`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Violation {
     /// Dotted path to the offending value; empty for document-level issues.
@@ -132,34 +131,25 @@ fn builtin(name: &str) -> Option<Builtin> {
     }
 }
 
-/// Verifies `doc` against a standalone schema document: a bare KVD tree
-/// whose leaf values are builtin type names or the `{}`/`[]` literals.
-/// Metakeys in the schema are an error — `__schema__` belongs in data
-/// documents (spec §4).
+/// Verifies `doc` against a schema document: a bare KVD tree
+/// whose leaf values are builtin type names or the `{}`/`[]` literals
+/// (spec §4).
 ///
 /// Returns `Ok(())` when the document conforms. A malformed schema yields
 /// [`VerifyError::SchemaMalformed`] (distinct from [`VerifyError::Violations`],
 /// which covers a well-formed schema applied to a non-conforming document); a
 /// parse failure of either input is [`VerifyError::ParseDoc`] /
 /// [`VerifyError::ParseSchema`].
-///
-/// Metakeys at the data root (`__schema__`) are excluded from the check —
-/// they are not part of the data model (spec §2) — so a document with an
-/// embedded schema can also be verified against an external one.
 pub fn verify(doc: &Node, schema: &Node) -> Result<(), VerifyError> {
     // A malformed schema cannot meaningfully check a document, so validate
     // the schema first and report its problems distinctly (spec §8.3).
     let mut schema_issues = Vec::new();
-    reject_schema_metakeys(schema, &mut schema_issues);
-    if schema_issues.is_empty() {
-        validate_schema(schema, "", &mut schema_issues);
-    }
+    validate_schema(schema, "", &mut schema_issues);
     if !schema_issues.is_empty() {
         return Err(VerifyError::SchemaMalformed(schema_issues));
     }
     let mut out = Vec::new();
-    let data = strip_data_metakeys(doc);
-    check(schema, &data, "", &mut out);
+    check(schema, doc, "", &mut out);
     if out.is_empty() {
         Ok(())
     } else {
@@ -436,61 +426,6 @@ fn validate_validation_block(vmap: &Map, type_name: &str, path: &str, out: &mut 
 fn is_big_int(s: &str) -> bool {
     let t = s.trim_start_matches(['+', '-']);
     !t.is_empty() && t.chars().all(|c| c.is_ascii_digit())
-}
-
-/// Verifies `doc` against its own embedded schema — the `__schema__` entry at
-/// the document root (spec §8.1). A document with no `__schema__` carries no
-/// constraints and verifies successfully.
-///
-/// The embedded schema is checked by the same rules as a standalone one, so a
-/// malformed embedded schema is reported as [`VerifyError::SchemaMalformed`]
-/// rather than silently ignored.
-pub fn verify_embedded(doc: &Node) -> Result<(), VerifyError> {
-    let Some(schema) = doc.as_map().and_then(|m| m.get("__schema__")) else {
-        return Ok(());
-    };
-    verify(doc, schema)
-}
-
-/// Parses a data document that may carry an embedded `__schema__` and verifies
-/// it against that schema. The one-call form of
-/// [`crate::deserialize::from_str`] + [`verify_embedded`].
-pub fn verify_embedded_from_str(doc: &str) -> Result<(), VerifyError> {
-    let d = crate::deserialize::from_str(doc).map_err(VerifyError::ParseDoc)?;
-    verify_embedded(&d)
-}
-
-/// A standalone schema document must be bare: any metakey at its root is
-/// a wrapped-form leftover and an error (spec §4).
-fn reject_schema_metakeys(schema: &Node, out: &mut Vec<Violation>) {
-    if let Some(m) = schema.as_map() {
-        for (k, _) in m.iter() {
-            if crate::grammar::is_metakey(k) {
-                out.push(Violation::new(
-                    k,
-                    "metakey in a standalone schema document \
-                     (`__schema__` belongs in data documents)",
-                ));
-            }
-        }
-    }
-}
-
-/// Metakeys are not data (spec §2); drop them from a data document's root
-/// before checking it against an external schema.
-fn strip_data_metakeys(doc: &Node) -> Node {
-    match doc.as_map() {
-        Some(m) if m.iter().any(|(k, _)| crate::grammar::is_metakey(k)) => {
-            let mut filtered = Map::new();
-            for (k, v) in m.iter() {
-                if !crate::grammar::is_metakey(k) {
-                    filtered.insert(k.to_string(), v.clone());
-                }
-            }
-            Node::map(filtered)
-        }
-        _ => doc.clone(),
-    }
 }
 
 /// Extracts an unquoted type-name word from a schema scalar (spec §5).
@@ -1452,25 +1387,9 @@ mod tests {
     }
 
     #[test]
-    fn standalone_schema_must_be_bare() {
-        let d = deserialize::from_str("p: 1\n").unwrap();
-
-        // Wrapped form is an error outside data documents.
-        let wrapped = "__schema__:\n  p: int\n";
-        {
-            let s = deserialize::from_str(wrapped).unwrap();
-            let v = verify(&d, &s).unwrap_err();
-            let violations = match v {
-                VerifyError::SchemaMalformed(v) => v,
-                other => panic!("expected SchemaMalformed, got {other:?}"),
-            };
-            assert!(
-                violations
-                    .iter()
-                    .all(|x| x.message.contains("metakey in a standalone")),
-                "{wrapped}: {violations:?}"
-            );
-        }
+    fn dunder_keys_verify_like_any_key() {
+        // No metakeys: a quoted dunder key is an ordinary key on both sides.
+        ok("\"__schema__\": x\n", "\"__schema__\": str\n");
     }
 
     #[test]
@@ -1517,22 +1436,9 @@ mod tests {
     }
 
     #[test]
-    fn verify_embedded_uses_root_schema() {
-        let d = deserialize::from_str("__schema__:\n  port: int\nport: 8080\n").unwrap();
-        assert!(verify_embedded(&d).is_ok());
-        // A schema violation against the embedded schema is reported.
-        let bad = deserialize::from_str("__schema__:\n  port: int\nport: \"http\"\n").unwrap();
-        assert!(verify_embedded(&bad).is_err());
-        // Embedded schemas with container descriptors round-trip through emit.
-        let s =
-            "__schema__:\n  ports:\n    type: list\n    element: int\nports:\n  - 80\n  - 443\n";
-        assert!(verify_embedded_from_str(s).is_ok());
-    }
-
-    #[test]
-    fn verify_embedded_absent_is_ok() {
-        let d = deserialize::from_str("port: 8080\n").unwrap();
-        assert!(verify_embedded(&d).is_ok());
+    fn bare_dunder_key_is_parse_error() {
+        // Bare `__name__` cannot match the key grammar (leading/trailing `_`).
+        assert!(deserialize::from_str("__schema__:\n  p: int\n").is_err());
     }
 
     #[test]

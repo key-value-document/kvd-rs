@@ -6,7 +6,7 @@
 //! bare for schema documents (spec §4). Strings containing newlines use the
 //! `"""` block form.
 
-use crate::grammar::{is_builtin_type, is_key, is_known_metakey};
+use crate::grammar::{is_builtin_type, is_key};
 use crate::value::{Map, Node, Scalar, Shape};
 #[cfg(not(any(test, feature = "serde")))]
 #[allow(unused_imports)]
@@ -473,18 +473,17 @@ fn quote_str(s: &str) -> String {
     escape(s)
 }
 
-/// Quotes `s` unless it is a valid key token (spec §4). Unlike
+/// Quotes `s` unless it is a valid key token (spec §4).
 fn quote_key(s: &str) -> Result<String, SerializeError> {
     if s.is_empty() {
         return Err(SerializeError::new("empty key"));
     }
-    if is_key(s) || is_known_metakey(s) {
+    if is_key(s) {
         Ok(s.to_string())
     } else {
         // Non-bare key (e.g. a Kubernetes label/annotation key such as
-        // `app.kubernetes.io/name`): emit it double-quoted so it round-trips
-        // (spec §4). Quoting a metakey-like key such as "__foo__" yields a
-        // literal key rather than an error.
+        // `app.kubernetes.io/name`, or a dunder key such as `"__foo__"`):
+        // emit it double-quoted so it round-trips (spec §4).
         Ok(escape(s))
     }
 }
@@ -817,17 +816,16 @@ mod tests {
     }
 
     #[test]
-    fn quote_key_quotes_metakey_like_literal() {
-        // An unknown metakey-looking key is quoted (literal), not errored.
+    fn quote_key_quotes_dunder_literal() {
+        // A dunder key cannot be bare; it is quoted like any non-key.
         assert_eq!(quote_key("__foo__").unwrap(), "\"__foo__\"");
     }
 
     #[test]
-    fn known_metakey_round_trips() {
-        // Known metakeys (e.g. __schema__) are bare and round-trip verbatim.
-        let schema = crate::deserialize::from_str("__schema__:\n  a: int\n").unwrap();
+    fn quoted_dunder_key_round_trips() {
+        let schema = crate::deserialize::from_str("\"__schema__\": x\n").unwrap();
         let out = to_string(&schema).unwrap();
-        assert_eq!(out, "__schema__:\n  a: int\n");
+        assert_eq!(out, "\"__schema__\": \"x\"\n");
     }
 
     #[test]

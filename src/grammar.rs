@@ -21,27 +21,6 @@ pub fn is_key(s: &str) -> bool {
     last.is_none_or(|c| c.is_ascii_alphanumeric())
 }
 
-/// `__ [a-z] [a-z0-9_-]* __` (spec §3 `metakey`).
-pub fn is_metakey(s: &str) -> bool {
-    let b = s.as_bytes();
-    if b.len() < 5 {
-        return false;
-    }
-    if &b[0..2] != b"__" || &b[b.len() - 2..] != b"__" {
-        return false;
-    }
-    let inner = &b[2..b.len() - 2];
-    inner[0].is_ascii_lowercase()
-        && inner
-            .iter()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-' || *c == b'_')
-}
-
-/// The metakey defined by the spec (§3).
-pub fn is_known_metakey(s: &str) -> bool {
-    matches!(s, "__schema__")
-}
-
 /// `[a-z] [a-z0-9_-]*` (spec §3 `type`; forced lowercase).
 pub fn is_type_name(s: &str) -> bool {
     let mut chars = s.chars();
@@ -369,43 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn metakey_and_type() {
-        // Metakey: __ [a-z][a-z0-9_-]* __  (len >=5)
-        assert!(is_metakey("__schema__"));
-        assert!(is_metakey("__my_type__"));
-        assert!(is_metakey("__x__y__"));
-        assert!(is_metakey("__a__")); // 5-char minimum: __ + one letter + __
-        assert!(is_metakey("__ab__"));
-        assert!(is_metakey("__a1__"));
-        assert!(is_metakey("__a-b__"));
-        assert!(is_metakey("__a_b__"));
-        assert!(is_metakey("__a1-b2_c3__"));
-        assert!(is_metakey("__x1__"));
-        // Invalid metakey.
-        assert!(!is_metakey("__Document__")); // uppercase
-        assert!(!is_metakey("__A__"));
-        assert!(!is_metakey("__1a__")); // must start lowercase
-        assert!(!is_metakey("__-a__"));
-        assert!(!is_metakey("__a__extra")); // trailing chars
-        assert!(!is_metakey("___a__")); // leading extra _
-        assert!(is_metakey("__a___")); // inner "a_" + trailing __ => valid
-        assert!(!is_metakey("__x_")); // too short
-        assert!(!is_metakey("__"));
-        assert!(!is_metakey("____"));
-        assert!(!is_metakey("__ab")); // missing trailing __
-        assert!(!is_metakey("ab__")); // missing leading __
-        assert!(!is_metakey("x__y__")); // no leading __
-        assert!(is_metakey("__a__b__")); // inner "a__b" valid -> true
-        assert!(!is_metakey("__A__b__")); // uppercase in inner
-        assert!(!is_metakey(""));
-        assert!(!is_metakey("__a-b")); // missing trailing __
-        // Known metakey — only __schema__.
-        assert!(is_known_metakey("__schema__"));
-        assert!(!is_known_metakey("__my_type__"));
-        assert!(!is_known_metakey("__a__"));
-        assert!(!is_known_metakey("__SCHEMA__"));
-        assert!(!is_known_metakey("schema"));
-        // Type names: [a-z][a-z0-9_-]*
+    fn type_names() {
         assert!(is_type_name("port"));
         assert!(is_type_name("my_type"));
         assert!(is_type_name("a"));

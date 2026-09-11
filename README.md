@@ -122,8 +122,6 @@ if let Err(violations) = kvd_rs::schema::verify(&doc, &schema) {
 // optional types: verify(&doc, &schema) where `retries: { type: int, optional: true }` allows absence/null
 ```
 
-To verify against an embedded schema (`__schema__` at the document root), use `kvd_rs::schema::verify_embedded(&doc)`.
-
 ## Errors
 
 Parse errors carry `line:col` and an `ErrorKind` (e.g. `bad-indent`, `unexpected-character`). Verification returns a list of `Violation` values with dotted paths:

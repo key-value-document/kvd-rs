@@ -6,15 +6,12 @@
 //! lookahead; errors carry a line:col position and a category from
 //! [`ErrorKind`] (spec §7).
 //!
-//! The parser is registry-free and lossless: the `__schema__` metakey is
-//! validated but kept as an ordinary entry of the returned root map, so
-//! `serialize(from_str(text))` reproduces schema documents verbatim.
+//! The parser is registry-free and lossless: `serialize(from_str(text))`
+//! reproduces schema documents verbatim.
 //! Schema verification is a separate pass (spec §5).
 
 use crate::error::{Error, ErrorKind, Result};
-use crate::grammar::{
-    is_builtin_type, is_float, is_int, is_key, is_known_metakey, is_metakey, is_type_name,
-};
+use crate::grammar::{is_builtin_type, is_float, is_int, is_key, is_type_name};
 use crate::value::{Map, Node, Scalar, Shape};
 #[cfg(not(any(test, feature = "serde")))]
 #[allow(unused_imports)]
@@ -101,12 +98,12 @@ impl Parser {
     }
 
     fn parse_document(&mut self) -> Result<Node> {
-        let map = self.parse_pairs(0, true, 1)?;
+        let map = self.parse_pairs(0, 1)?;
         Ok(Node::Map(map))
     }
 
     /// Parses consecutive `path: value` pairs whose keys start at `indent`.
-    fn parse_pairs(&mut self, indent: usize, root: bool, depth: usize) -> Result<Map> {
+    fn parse_pairs(&mut self, indent: usize, depth: usize) -> Result<Map> {
         let mut map = Map::new();
         loop {
             self.skip_insignificant();
@@ -141,7 +138,7 @@ impl Parser {
                     "dict entry where a mapping pair was expected",
                 ));
             }
-            let (path, value) = self.parse_pair(indent, root, depth)?;
+            let (path, value) = self.parse_pair(indent, depth)?;
             insert_path(&mut map, &path, value, last_line_no(&self.lines, self.pos))?;
         }
         Ok(map)
@@ -152,19 +149,14 @@ impl Parser {
     /// Precondition: `self.pos` points at the key line and its indent equals
     /// `keycol`. Consumes the key line; block content and subtrees are read
     /// from the following lines.
-    fn parse_pair(
-        &mut self,
-        keycol: usize,
-        root: bool,
-        depth: usize,
-    ) -> Result<(Vec<String>, Node)> {
+    fn parse_pair(&mut self, keycol: usize, depth: usize) -> Result<(Vec<String>, Node)> {
         let line = &self.lines[self.pos];
         let line_no = line.no;
         let stripped = line.stripped().to_string();
         check_tab(&line.rest, line_no, keycol + 1)?;
         self.pos += 1;
 
-        let Some((segs, after)) = scan_path(&stripped, line_no, keycol + 1, root)? else {
+        let Some((segs, after)) = scan_path(&stripped, line_no, keycol + 1)? else {
             return Err(error(
                 ErrorKind::UnexpectedCharacter,
                 line_no,
@@ -205,7 +197,7 @@ impl Parser {
                     } else if l.is_dict_marker() {
                         Node::Dict(self.parse_entries(child, depth + segs.len())?)
                     } else {
-                        Node::Map(self.parse_pairs(child, false, depth + segs.len())?)
+                        Node::Map(self.parse_pairs(child, depth + segs.len())?)
                     }
                 }
             }
@@ -310,7 +302,7 @@ impl Parser {
                 // lines and closer both sit two columns past the marker.
                 self.pos += 1;
                 items.push(Node::Scalar(self.read_triple(indent + 2)?));
-            } else if matches!(scan_path(&content, line_no, indent + 3, false), Ok(Some(_))) {
+            } else if matches!(scan_path(&content, line_no, indent + 3), Ok(Some(_))) {
                 // Inline first pair of a mapping item: rewrite the line so
                 // the pair starts at its real column, parse it, then consume
                 // continuation pairs aligned to that column.
@@ -319,7 +311,7 @@ impl Parser {
                 slot.indent += 2;
                 slot.rest = inner;
                 let keycol = indent + 2;
-                let (path, value) = self.parse_pair(keycol, false, depth + 1)?;
+                let (path, value) = self.parse_pair(keycol, depth + 1)?;
                 let mut map = Map::new();
                 insert_path(&mut map, &path, value, line_no)?;
                 loop {
@@ -342,7 +334,7 @@ impl Parser {
                         break; // next item
                     }
                     let cont_no = cont.no;
-                    let (p2, v2) = self.parse_pair(keycol, false, depth + 1)?;
+                    let (p2, v2) = self.parse_pair(keycol, depth + 1)?;
                     insert_path(&mut map, &p2, v2, cont_no)?;
                 }
                 items.push(Node::Map(map));
@@ -379,7 +371,7 @@ impl Parser {
         } else if l.is_dict_marker() {
             Ok(Node::Dict(self.parse_entries(child, depth + 1)?))
         } else {
-            Ok(Node::Map(self.parse_pairs(child, false, depth + 1)?))
+            Ok(Node::Map(self.parse_pairs(child, depth + 1)?))
         }
     }
 
@@ -541,7 +533,7 @@ impl Parser {
                     } else if l.is_dict_marker() {
                         Node::Dict(self.parse_entries(child, depth + 1)?)
                     } else {
-                        Node::Map(self.parse_pairs(child, false, depth + 1)?)
+                        Node::Map(self.parse_pairs(child, depth + 1)?)
                     }
                 }
             }
@@ -757,14 +749,8 @@ fn insert_path(map: &mut Map, path: &[String], value: Node, line_no: usize) -> R
 ///
 /// Returns `Ok(None)` when `s` cannot be a pair (no top-level `:`), which
 /// lets list-item parsing fall back to scalar. Returns the segments and the
-/// offset just past the `:` otherwise. Metakey routing is validated here:
-/// known metakeys only at the document root, unknown ones rejected.
-fn scan_path(
-    s: &str,
-    line_no: usize,
-    base_col: usize,
-    root: bool,
-) -> Result<Option<(Vec<String>, usize)>> {
+/// offset just past the `:` otherwise.
+fn scan_path(s: &str, line_no: usize, base_col: usize) -> Result<Option<(Vec<String>, usize)>> {
     let mut segs: Vec<String> = Vec::new();
     let mut c = 0usize;
     loop {
@@ -772,8 +758,7 @@ fn scan_path(
         let seg = match s.as_bytes().get(c) {
             Some(b'"') | Some(b'\'') => {
                 // Quoted segment: a literal key that may contain '.', '/',
-                // ':', etc. Metakey recognition applies only to bare segments
-                // (spec §4), so a quoted "__schema__" is data, not a metakey.
+                // ':', etc.
                 let (text, used) = scan_quoted_segment(&s[c..], line_no, col)?;
                 c += used;
                 if text.is_empty() {
@@ -793,7 +778,7 @@ fn scan_path(
                         "empty path segment",
                     ));
                 }
-                validate_key_seg(raw, segs.is_empty(), root, line_no, col)?;
+                validate_key_seg(raw, line_no, col)?;
                 raw.to_string()
             }
             None => {
@@ -827,27 +812,8 @@ fn scan_path(
     }
 }
 
-/// Validates one unquoted path segment against the key/metakey grammar.
-fn validate_key_seg(raw: &str, first: bool, root: bool, line_no: usize, col: usize) -> Result<()> {
-    if is_metakey(raw) {
-        if first && root {
-            if !is_known_metakey(raw) {
-                return Err(error(
-                    ErrorKind::UnknownMetakey,
-                    line_no,
-                    col,
-                    format!("unknown metakey `{raw}`"),
-                ));
-            }
-            return Ok(());
-        }
-        return Err(error(
-            ErrorKind::MetakeyOutsideRoot,
-            line_no,
-            col,
-            format!("metakey `{raw}` is only allowed at the document root"),
-        ));
-    }
+/// Validates one unquoted path segment against the key grammar.
+fn validate_key_seg(raw: &str, line_no: usize, col: usize) -> Result<()> {
     if !is_key(raw) {
         return Err(error(
             ErrorKind::UnexpectedCharacter,
@@ -1254,9 +1220,10 @@ other: 3";
     }
 
     #[test]
-    fn metakeys_at_root() {
-        let t = "__schema__:\n  db.port: int";
-        assert_eq!(scalar_text(t, "__schema__.db.port"), "int");
+    fn dunder_keys_are_ordinary() {
+        // No metakeys: a quoted dunder key is an ordinary key.
+        let t = "\"__schema__\": x\n";
+        assert_eq!(scalar_text(t, "__schema__"), "x");
     }
 
     // ---- lists ----
@@ -1523,13 +1490,10 @@ b: \"\"\"
     }
 
     #[test]
-    fn err_unknown_metakey() {
-        assert_eq!(err("__bogus__: 1").kind, UnknownMetakey);
-    }
-
-    #[test]
-    fn err_metakey_not_at_root() {
-        assert_eq!(err("a:\n  __schema__: x").kind, MetakeyOutsideRoot);
+    fn err_bare_dunder_key() {
+        // Bare `__name__` cannot match the key grammar (leading/trailing `_`).
+        assert_eq!(err("__bogus__: 1").kind, UnexpectedCharacter);
+        assert_eq!(err("a:\n  __schema__: x").kind, UnexpectedCharacter);
     }
 
     #[test]
@@ -1625,7 +1589,7 @@ b: \"\"\"
     }
 
     #[test]
-    fn quoted_metakey_is_literal() {
+    fn quoted_dunder_key_is_ordinary() {
         let doc = from_str("\"__schema__\": x\n").unwrap();
         assert!(doc.as_map().unwrap().get("__schema__").is_some());
     }

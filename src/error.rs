@@ -32,10 +32,6 @@ pub enum ErrorKind {
     BadPath,
     /// A quoted string or `"""` block is not terminated.
     Unterminated,
-    /// A `__...__` key is not a defined metakey.
-    UnknownMetakey,
-    /// A metakey appears outside the document root.
-    MetakeyOutsideRoot,
     /// Nesting exceeds the depth limit.
     DepthLimit,
     /// A character is not allowed in this position.
@@ -60,8 +56,6 @@ impl ErrorKind {
             ErrorKind::LeafInteriorConflict => "leaf-interior-conflict",
             ErrorKind::BadPath => "bad-path",
             ErrorKind::Unterminated => "unterminated",
-            ErrorKind::UnknownMetakey => "unknown-metakey",
-            ErrorKind::MetakeyOutsideRoot => "metakey-outside-root",
             ErrorKind::DepthLimit => "depth-limit",
             ErrorKind::UnexpectedCharacter => "unexpected-character",
             ErrorKind::NotAMap => "not-a-map",
