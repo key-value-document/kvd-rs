@@ -274,11 +274,20 @@ impl Parser {
                 // entries (spec §4 `'- ' entries`).
                 self.rewrite_inline_marker();
                 items.push(Node::Dict(self.parse_entries(indent + 2, depth + 1)?));
-            } else if content == "\"\"\"" {
-                // Triple-quoted string as a list item (spec §5): content
+            } else if content == "\"\"\"" || content == "'''" {
+                // Multi-line string as a list item (spec §4): content
                 // lines and closer both sit two columns past the marker.
+                let (delim, escapes) = if content == "\"\"\"" {
+                    ("\"\"\"", true)
+                } else {
+                    ("'''", false)
+                };
                 self.pos += 1;
-                items.push(Node::Scalar(self.read_triple(indent + 2)?));
+                items.push(Node::Scalar(self.read_triple(
+                    indent + 2,
+                    delim,
+                    escapes,
+                )?));
             } else if matches!(scan_path(&content, line_no, indent + 3), Ok(Some(_))) {
                 // Inline first pair of a mapping item: rewrite the line so
                 // the pair starts at its real column, parse it, then consume
@@ -331,8 +340,8 @@ impl Parser {
         slot.rest = inner;
     }
 
-    /// Parses an inline value after `key: `: a `"""` block, a scalar token,
-    /// or an error for a misplaced triple opener.
+    /// Parses an inline value after `key: `: a `"""` or `'''` block, a
+    /// scalar token, or an error for a misplaced block opener.
     fn parse_inline_value(
         &mut self,
         v: &str,
@@ -341,12 +350,21 @@ impl Parser {
         value_col: usize,
     ) -> Result<Node> {
         match v {
-            "\"\"\"" => Ok(Node::Scalar(self.read_triple(keycol)?)),
+            "\"\"\"" => Ok(Node::Scalar(self.read_triple(keycol, "\"\"\"", true)?)),
+            "'''" => Ok(Node::Scalar(self.read_triple(keycol, "'''", false)?)),
             _ if v.starts_with("\"\"\"") => Err(error(
                 ErrorKind::UnexpectedCharacter,
                 line_no,
                 value_col + 1,
                 "triple-quoted string must start on its own line",
+            )),
+            // Maximal munch: `'''` always opens a block, so `''''` is an
+            // opener followed by a stray quote, not two empty strings.
+            _ if v.starts_with("'''") => Err(error(
+                ErrorKind::UnexpectedCharacter,
+                line_no,
+                value_col + 1,
+                "single-quoted multi-line string must start on its own line",
             )),
             _ => self.scalar_from_token(v, line_no, value_col + 1),
         }
@@ -564,24 +582,29 @@ impl Parser {
         Ok((key, value))
     }
 
-    /// Reads a `"""` block whose key line has been consumed. Content is
+    /// Reads a multi-line block whose key line has been consumed.
+    /// Content is
     /// every following line indented past `keycol`; blanks are content too.
     /// The common indent of non-blank lines is stripped. The block ends at
-    /// a `"""` closer; a missing closer is an error.
+    /// a closer; a missing closer is an error.
     ///
-    /// Two closer forms (spec §5):
-    ///   - Standalone: `"""` alone on a line at exactly `keycol` → trailing `\n` added.
-    ///   - Inline: `"""` appended to the last content line → no trailing `\n`.
+    /// Two closer forms (spec §4):
+    ///   - Standalone: the delimiter alone on a line at exactly `keycol` → trailing `\n` added.
+    ///   - Inline: the delimiter appended to the last content line → no trailing `\n`.
     ///
-    /// Escapes are processed per content line (same rules as `"..."`).
-    fn read_triple(&mut self, keycol: usize) -> Result<Scalar> {
-        /// One collected `"""` content line: raw text plus its source
+    /// `escapes` distinguishes the two forms: `"""` processes escapes per
+    /// content line (same rules as `"..."`), while `'''` is literal, so a
+    /// backslash in embedded script or SQL stands for itself.
+    fn read_triple(&mut self, keycol: usize, delim: &str, escapes: bool) -> Result<Scalar> {
+        /// One collected content line: raw text plus its source
         /// position for escape-error reporting.
         struct ContentLine {
             raw: String,
             line_no: usize,
             indent: usize,
         }
+        let quote = if escapes { '"' } else { '\'' };
+        let missing = format!("unterminated multi-line string (missing `{delim}`)");
         let mut content: Vec<ContentLine> = Vec::new();
         let mut trailing_nl = false;
         let mut i = self.pos;
@@ -591,7 +614,7 @@ impl Parser {
                     ErrorKind::Unterminated,
                     self.lines.last().map(|l| l.no).unwrap_or(0),
                     1,
-                    "unterminated triple-quoted string (missing `\"\"\"`)",
+                    missing,
                 ));
             }
             let l = &self.lines[i];
@@ -606,26 +629,23 @@ impl Parser {
                 i += 1;
                 continue;
             }
-            // Standalone closer: `"""` alone at exactly keycol → trailing \n.
-            // Checked before the indent guard so that list-item `"""` blocks,
-            // where content and closer share the same column, are handled correctly.
-            if l.indent == keycol && l.rest.trim() == "\"\"\"" {
+            // Standalone closer: the delimiter alone at exactly keycol →
+            // trailing \n. Checked before the indent guard so that list-item
+            // blocks, where content and closer share the same column, are
+            // handled correctly.
+            if l.indent == keycol && l.rest.trim() == delim {
                 self.pos = i + 1;
                 trailing_nl = true;
                 break;
             }
             if l.indent < keycol {
-                return Err(error(
-                    ErrorKind::Unterminated,
-                    l.no,
-                    l.indent + 1,
-                    "unterminated triple-quoted string (missing `\"\"\"`)",
-                ));
+                return Err(error(ErrorKind::Unterminated, l.no, l.indent + 1, missing));
             }
-            // Inline closer: content line ending with `"""` → no trailing \n.
-            if l.rest.trim_end().ends_with("\"\"\"") {
+            // Inline closer: content line ending with the delimiter → no
+            // trailing \n.
+            if l.rest.trim_end().ends_with(delim) {
                 let raw = &l.raw;
-                let closer_pos = raw.rfind("\"\"\"").expect("just confirmed");
+                let closer_pos = raw.rfind(delim).expect("just confirmed");
                 content.push(ContentLine {
                     raw: raw[..closer_pos].to_string(),
                     line_no: l.no,
@@ -655,7 +675,12 @@ impl Parser {
                     Ok(String::new())
                 } else {
                     let stripped = &line.raw[common.min(line.raw.len())..];
-                    scan_escapes(stripped, line.line_no, line.indent + 1 + common)
+                    if escapes {
+                        scan_escapes(stripped, line.line_no, line.indent + 1 + common)
+                    } else {
+                        // Literal form: the text stands for itself.
+                        Ok(stripped.to_string())
+                    }
                 }
             })
             .collect::<Result<Vec<String>>>()?;
@@ -668,7 +693,7 @@ impl Parser {
         Ok(Scalar {
             shape: Shape::Str,
             text: text.clone(),
-            raw: format!("\"{}\"", text),
+            raw: format!("{quote}{text}{quote}"),
         })
     }
 
