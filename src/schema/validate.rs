@@ -6,7 +6,7 @@ use super::{Builtin, Violation, builtin};
 use crate::value::{Map, Node, Shape, join_path};
 use alloc::vec::Vec;
 
-/// Collects structural problems in a schema tree (spec §5, §10). A well-formed
+/// Collects structural problems in a schema tree (spec §5, §9). A well-formed
 /// schema is a bare tree whose leaves are builtin type names, `{}`/`[]`
 /// literals, or descriptor maps carrying a `type`. Problems found here are
 /// surfaced as [`VerifyError::SchemaMalformed`], separate from document
@@ -77,7 +77,7 @@ pub fn validate_schema(schema: &Node, path: &str, out: &mut Vec<Violation>) {
     }
 }
 
-/// Validates a descriptor map's internal structure (spec §10).
+/// Validates a descriptor map's internal structure (spec §9).
 pub(crate) fn validate_descriptor_schema(
     m: &Map,
     type_name: &str,
@@ -209,7 +209,7 @@ pub(crate) fn validate_descriptor_schema(
     }
 }
 
-/// Validates the contents of a `validation` map for a given builtin type (spec §10).
+/// Validates the contents of a `validation` map for a given builtin type (spec §9).
 pub(crate) fn validate_validation_block(
     vmap: &Map,
     type_name: &str,
@@ -220,6 +220,8 @@ pub(crate) fn validate_validation_block(
     let allowed: &[&str] = match builtin {
         Builtin::Int | Builtin::Float => &["min", "max", "exclusive_min", "exclusive_max"],
         Builtin::Str => &["min_len", "max_len", "pattern"],
+        // `bytes` takes only lengths, counted in decoded octets (spec §9).
+        Builtin::Bytes => &["min_len", "max_len"],
         Builtin::List | Builtin::Dict => &["min_len", "max_len"],
         Builtin::Bool => &[],
     };

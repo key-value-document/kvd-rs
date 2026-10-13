@@ -26,7 +26,7 @@ pub(crate) fn type_ref(s: &Scalar) -> Option<String> {
 /// Resolves a schema leaf to its builtin type name and optionality.
 ///
 /// A leaf is either a bare type-name scalar (`int`) or a descriptor map
-/// (`type: int`, optionally `optional: true`) — spec §5, §10. Returns
+/// (`type: int`, optionally `optional: true`) — spec §5, §9. Returns
 /// `None` for `{}`/`[]` leaves and for nested-schema maps/lists.
 pub(crate) fn descriptor(schema: &Node) -> Option<(String, bool)> {
     match schema {

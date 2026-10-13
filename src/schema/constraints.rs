@@ -1,4 +1,4 @@
-//! Validation constraint enforcement (spec §10).
+//! Validation constraint enforcement (spec §9).
 //!
 //! String length is Unicode scalar count, list/dict length is element count.
 
@@ -32,7 +32,7 @@ pub(crate) fn regex_for_pattern(pattern: &str) -> Result<regex::Regex, regex::Er
     Ok(re)
 }
 
-// Validation constraint enforcement (spec §10)
+// Validation constraint enforcement (spec §9)
 //
 // String length is Unicode scalar count (`chars().count()`), not bytes;
 // `list`/`dict` length is element/entry count. This matches the spec table
@@ -132,6 +132,20 @@ pub(crate) fn check_validation_for_scalar(
                         }
                     }
                     _ => {}
+                }
+            }
+        }
+        Builtin::Bytes => {
+            // `min_len`/`max_len` count decoded octets, never base64
+            // characters (spec §9). The shape check already ran, so the text
+            // decodes; an unexpected failure is skipped rather than reported
+            // twice.
+            let Ok(len) = crate::base64::decoded_len(&s.text) else {
+                return;
+            };
+            for (k, v) in vmap.iter() {
+                if matches!(k, "min_len" | "max_len") {
+                    check_len_bound(len as i64, k, v, path, out);
                 }
             }
         }

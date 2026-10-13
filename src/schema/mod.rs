@@ -1,14 +1,19 @@
-//! Schema verification (spec §5, §10): a separate pass over a parsed document.
+//! Schema verification (spec §5, §9): a separate pass over a parsed document.
 //!
 //! The parser is registry-free; this module checks a data [`Node`] against
 //! a schema. A standalone schema document is ordinary KVD whose values are
-//! builtin scalar type names (`int`, `float`, `bool`, `str`), container type
+//! builtin scalar type names (`int`, `float`, `bool`, `str`, `bytes`),
+//! container type
 //! names (`list`, `dict`) inside a `type:` descriptor, or the `{}` / `[]`
 //! literals — a bare tree mirroring the data's structure (spec §4). A
 //! one-item list declares the element type for every item of the
 //! corresponding data list. Descriptors may carry `optional: true`, an ignored
 //! `description` string, and a `validation` block with ranges, lengths,
-//! and patterns (spec §10).
+//! and patterns (spec §9).
+//!
+//! `bytes` is schema-level: it adds no token to the data grammar, so a
+//! `bytes`-typed key holds an ordinary quoted string whose text is base64
+//! (spec §5).
 
 mod check;
 mod constraints;
@@ -94,6 +99,7 @@ pub(crate) enum Builtin {
     Float,
     Bool,
     Str,
+    Bytes,
     List,
     Dict,
 }
@@ -104,6 +110,7 @@ pub(crate) fn builtin(name: &str) -> Option<Builtin> {
         "float" => Some(Builtin::Float),
         "bool" => Some(Builtin::Bool),
         "str" => Some(Builtin::Str),
+        "bytes" => Some(Builtin::Bytes),
         "list" => Some(Builtin::List),
         "dict" => Some(Builtin::Dict),
         _ => None,

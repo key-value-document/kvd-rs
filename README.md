@@ -17,11 +17,11 @@ Or add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-kvd-rs = { version = "1.0.0", features = ["serde"] }
+kvd-rs = { version = "1.2.0", features = ["serde"] }
 serde = { version = "1.0.0", features = ["derive"] }
 ```
 
-Without `serde` the crate has a single dependency (`regex`) for `§10` validation and exposes the `Node` API; the crate is `std` (validation requires `std`).
+Without `serde` the crate has a single dependency (`regex`) for `§9` validation and exposes the `Node` API; the crate is `std` (validation requires `std`).
 
 ## Usage
 
@@ -121,6 +121,35 @@ if let Err(violations) = kvd_rs::schema::verify(&doc, &schema) {
 }
 // optional types: verify(&doc, &schema) where `retries: { type: int, optional: true }` allows absence/null
 ```
+
+## Binary data: `bytes` (1.2)
+
+`bytes` is a schema-level type: it adds no token to the data grammar, so a
+`bytes`-typed key holds an ordinary quoted string whose text is base64. The
+parser still sees a string, and only the schema makes it binary.
+
+```rust
+// data:  cert: "AQIDBA=="      schema:  cert: bytes
+let ok = kvd_rs::schema::verify_from_str(
+    "cert: \"AQIDBA==\"\n",
+    "cert: bytes\n",
+);
+
+let octets = kvd_rs::base64::decode("AQIDBA==")?; // [1, 2, 3, 4]
+let text = kvd_rs::base64::encode(&octets);       // "AQIDBA=="
+```
+
+Decoding is strict: standard alphabet, padding only at the end, length a
+multiple of 4, and zero pad bits (RFC 4648 §3.5). Two deliberate rules:
+
+- **Line breaks are layout.** CR and LF are dropped, so a wrapped value or a
+  `"""` block decodes to the same octets.
+- **Spaces and tabs are content.** `cert: "AQ IDBA=="` is an `invalid bytes`
+  violation, because a space mid-blob is a bad paste far more often than it is
+  layout.
+
+`min_len` / `max_len` count **decoded octets**, never base64 characters. A
+`bytes` field with no schema is just a string.
 
 ## Errors
 

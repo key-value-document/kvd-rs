@@ -3,9 +3,10 @@
 //! This crate provides the value model ([`value`]), error model
 //! ([`error`]), grammar predicates ([`grammar`]), parser
 //! ([`deserialize`]), serializer ([`serialize`]), schema verification
-//! ([`schema`]), and programmatic document editing ([`ops`]) for the KVD
-//! format. YAML conversion and the `yaml2kvd` binary live in the
-//! `kvd-yaml` crate.
+//! ([`schema`]), programmatic document editing ([`ops`]), and base64
+//! decoding for the schema-level `bytes` type ([`base64`]) for the KVD
+//! format. YAML conversion and the `yaml2kvd` binary live
+//! in the `kvd-yaml` crate.
 //!
 //! With the optional `serde` feature, any `T: Deserialize`/`T: Serialize`
 //! works directly via the `serde` module's `from_str`/`to_string`
@@ -44,6 +45,7 @@
 
 extern crate alloc;
 
+pub mod base64;
 pub mod deserialize;
 pub mod error;
 pub mod grammar;

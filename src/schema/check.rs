@@ -6,7 +6,7 @@ use super::{Builtin, Violation, builtin};
 use crate::value::{Node, Shape, join_path};
 use alloc::vec::Vec;
 
-/// Validates `data` against a schema leaf descriptor (spec §5, §10).
+/// Validates `data` against a schema leaf descriptor (spec §5, §9).
 ///
 /// A descriptor is a map carrying a `type` key. Container types `list` and
 /// `dict` may carry `optional` and are dispatched to [`check_list`] /
@@ -54,7 +54,7 @@ pub(crate) fn check_list(schema: &Node, data: &Node, path: &str, out: &mut Vec<V
         ));
         return;
     };
-    // Length constraints first (spec §10).
+    // Length constraints first (spec §9).
     check_validation_for_list_or_dict(schema, data, Builtin::List, path, out);
     let Some(element) = schema.as_map().and_then(|m| m.get("element")) else {
         out.push(Violation::new(path, "type: list requires an `element` key"));
@@ -77,7 +77,7 @@ pub(crate) fn check_dict(schema: &Node, data: &Node, path: &str, out: &mut Vec<V
         return;
     };
     check_validation_for_list_or_dict(schema, data, Builtin::Dict, path, out);
-    // A `type: dict` descriptor may carry an `element` type (spec §10);
+    // A `type: dict` descriptor may carry an `element` type (spec §9);
     // every dict value must match it. Without `element`, any dict passes.
     if let Some(element) = schema.as_keyed().and_then(|m| m.get("element")) {
         let Some(dm) = data.as_keyed() else { return };
@@ -101,13 +101,13 @@ pub(crate) fn check(schema: &Node, data: &Node, path: &str, out: &mut Vec<Violat
                 }
                 return;
             }
-            // Descriptor leaf? (a map with a `type` key — spec §5, §10).
+            // Descriptor leaf? (a map with a `type` key — spec §5, §9).
             if descriptor(schema).is_some() {
                 check_descriptor(schema, data, path, out);
                 return;
             }
             // A map carrying `optional`/`validation` but no `type` is a
-            // malformed descriptor (spec §10).
+            // malformed descriptor (spec §9).
             if m.get("optional").is_some()
                 || m.get("description").is_some()
                 || m.get("deprecated").is_some()
@@ -219,6 +219,7 @@ pub(crate) fn check_shape(base: Builtin, data: &Node, path: &str, out: &mut Vec<
         Builtin::Float => "float",
         Builtin::Bool => "bool",
         Builtin::Str => "string",
+        Builtin::Bytes => "bytes",
         Builtin::List | Builtin::Dict => {
             unreachable!("container shapes handled by check_list/check_dict")
         }
@@ -230,19 +231,31 @@ pub(crate) fn check_shape(base: Builtin, data: &Node, path: &str, out: &mut Vec<
         ));
         return;
     };
-    let ok = match base {
-        Builtin::Int => s.shape == Shape::Int,
-        Builtin::Float => s.shape == Shape::Float,
-        Builtin::Bool => s.shape == Shape::Bool,
-        Builtin::Str => s.shape == Shape::Str,
-        Builtin::List | Builtin::Dict => {
-            unreachable!("container shapes handled by check_list/check_dict")
-        }
-    };
-    if !ok {
+    let mismatch = |out: &mut Vec<Violation>| {
         out.push(Violation::new(
             path,
             format!("expected {expected}, found {}", shape_name(s.shape)),
         ));
+    };
+    match base {
+        Builtin::Int if s.shape != Shape::Int => mismatch(out),
+        Builtin::Float if s.shape != Shape::Float => mismatch(out),
+        Builtin::Bool if s.shape != Shape::Bool => mismatch(out),
+        Builtin::Str if s.shape != Shape::Str => mismatch(out),
+        // `bytes` is schema-level: a `Str` whose text is valid base64. The
+        // decode belongs to the shape check, so bad base64 is an `invalid
+        // bytes` violation rather than a constraint failure (spec §5, §8.3),
+        // and constraint checks are skipped because `check_descriptor` only
+        // runs them when this added nothing.
+        Builtin::Bytes if s.shape != Shape::Str => mismatch(out),
+        Builtin::Bytes => {
+            if let Err(e) = crate::base64::decoded_len(&s.text) {
+                out.push(Violation::new(path, format!("invalid bytes: {e}")));
+            }
+        }
+        Builtin::List | Builtin::Dict => {
+            unreachable!("container shapes handled by check_list/check_dict")
+        }
+        _ => {}
     }
 }

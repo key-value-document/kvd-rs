@@ -446,7 +446,7 @@ fn malformed_schema_is_distinct_from_doc_violations() {
     }
 }
 
-// §10 Validation constraints
+// §9 Validation constraints
 #[test]
 fn int_validation_ranges() {
     ok(
