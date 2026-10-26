@@ -102,8 +102,24 @@ impl Parser {
         Ok(Node::Map(map))
     }
 
+    /// Rejects a container whose nesting slot is past [`crate::MAX_DEPTH`].
+    /// Pair keys are checked by [`Parser::parse_pair`]; containers reached
+    /// through `-`/`=` or a dotted-path subtree are checked here.
+    fn check_depth(&self, depth: usize) -> Result<()> {
+        if depth <= crate::MAX_DEPTH {
+            return Ok(());
+        }
+        Err(error(
+            ErrorKind::DepthLimit,
+            self.peek().map(|l| l.no).unwrap_or(0),
+            1,
+            format!("nesting exceeds the maximum depth of {}", crate::MAX_DEPTH),
+        ))
+    }
+
     /// Parses consecutive `path: value` pairs whose keys start at `indent`.
     fn parse_pairs(&mut self, indent: usize, depth: usize) -> Result<Map> {
+        self.check_depth(depth)?;
         let mut map = Map::new();
         loop {
             self.skip_insignificant();
@@ -218,6 +234,7 @@ impl Parser {
 
     /// Parses consecutive list items whose `-` markers start at `indent`.
     fn parse_items(&mut self, indent: usize, depth: usize) -> Result<Vec<Node>> {
+        self.check_depth(depth)?;
         let mut items = Vec::new();
         loop {
             self.skip_insignificant();
@@ -408,6 +425,7 @@ impl Parser {
     /// Parses consecutive dict entries (`= "k": value`) whose markers
     /// start at `indent` (spec §4 `entries`).
     fn parse_entries(&mut self, indent: usize, depth: usize) -> Result<Map> {
+        self.check_depth(depth)?;
         let mut map = Map::new();
         loop {
             self.skip_insignificant();
@@ -1571,6 +1589,36 @@ b: \"\"\"
         let parent: Vec<String> = (0..60).map(|i| format!("k{i}")).collect();
         let child: Vec<String> = (0..60).map(|i| format!("m{i}")).collect();
         let t = format!("{}:\n  {}: 0\n", parent.join("."), child.join("."));
+        assert_eq!(err(&t).kind, DepthLimit);
+    }
+
+    #[test]
+    fn depth_limit_counts_list_and_item_levels() {
+        fn dotted(n: usize) -> String {
+            (0..n)
+                .map(|i| format!("k{i}"))
+                .collect::<Vec<_>>()
+                .join(".")
+        }
+
+        // 99 segments + list = slot 100, exactly at the limit.
+        let t = format!("{}:\n  - 1\n", dotted(99));
+        let doc = from_str(&t).expect("list at max depth");
+        let out = crate::serialize::to_string(&doc).unwrap();
+        assert_eq!(from_str(&out).unwrap(), doc);
+
+        // 100 segments + list = slot 101.
+        let t = format!("{}:\n  - 1\n", dotted(100));
+        assert_eq!(err(&t).kind, DepthLimit);
+
+        // 98 segments + list + item key = slot 100.
+        let t = format!("{}:\n  - k: 1\n", dotted(98));
+        let doc = from_str(&t).expect("list-item key at max depth");
+        let out = crate::serialize::to_string(&doc).unwrap();
+        assert_eq!(from_str(&out).unwrap(), doc);
+
+        // 99 segments + list + item key = slot 101.
+        let t = format!("{}:\n  - k: 1\n", dotted(99));
         assert_eq!(err(&t).kind, DepthLimit);
     }
 

@@ -162,7 +162,7 @@ fn emit_entry(
 }
 
 /// Emits a list whose `-` markers start at `indent`. `depth` is the
-/// nesting slot of the items in the list.
+/// list's own nesting slot; keys in a list-item map/dict sit one below it.
 fn emit_list(
     items: &[Node],
     indent: usize,
@@ -182,12 +182,18 @@ fn emit_list(
                     writeln!(out, "{}- {{}}", pad)?;
                     continue;
                 }
+                if depth + 1 > crate::MAX_DEPTH {
+                    return Err(SerializeError::new(
+                        "nesting exceeds the maximum depth of 100",
+                    ));
+                }
                 let mut iter = m.iter();
                 let (first_key, first_value) = iter.next().expect("non-empty map");
                 let keycol = indent + 2;
-                emit_inline_pair(first_key, first_value, keycol, out, &pad, depth)?;
+                // Keys in a list-item map sit one slot below the list.
+                emit_inline_pair(first_key, first_value, keycol, out, &pad, depth + 1)?;
                 for (key, node) in iter {
-                    emit_pair(key, node, keycol, depth, out)?;
+                    emit_pair(key, node, keycol, depth + 1, out)?;
                 }
             }
             Node::List(items2) => {
@@ -203,14 +209,20 @@ fn emit_list(
                     writeln!(out, "{}- {{}}", pad)?;
                     continue;
                 }
+                if depth + 1 > crate::MAX_DEPTH {
+                    return Err(SerializeError::new(
+                        "nesting exceeds the maximum depth of 100",
+                    ));
+                }
                 // First entry inlined after the `-` (spec §4
                 // `'- ' entry`); the rest align to its column.
                 let mut iter = m.iter();
                 let (first_key, first_value) = iter.next().expect("non-empty dict");
                 let entry_col = indent + 2;
-                emit_inline_entry(first_key, first_value, entry_col, out, &pad, depth)?;
+                // A list-item dict sits one slot below the list, like a map.
+                emit_inline_entry(first_key, first_value, entry_col, out, &pad, depth + 1)?;
                 for (key, node) in iter {
-                    emit_entry(key, node, entry_col, &" ".repeat(entry_col), depth, out)?;
+                    emit_entry(key, node, entry_col, &" ".repeat(entry_col), depth + 1, out)?;
                 }
             }
             Node::Scalar(s) => {
@@ -687,6 +699,18 @@ mod tests {
         // the serializer only emits nesting, so the output would
         // not parse back.
         let err = to_string(&deep_chain(crate::MAX_DEPTH + 5)).unwrap_err();
+        assert!(err.to_string().contains("maximum depth"));
+    }
+
+    #[test]
+    fn err_depth_in_list_item_map() {
+        // 99 keys + list + item key is slot 101: the item key itself must
+        // be counted, even though its value is a scalar.
+        let mut node = Node::list(vec![doc(&[("k", scalar(Shape::Int, "1"))])]);
+        for i in (0..99).rev() {
+            node = doc(&[(&format!("k{i}"), node)]);
+        }
+        let err = to_string(&node).unwrap_err();
         assert!(err.to_string().contains("maximum depth"));
     }
 
