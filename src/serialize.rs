@@ -307,7 +307,9 @@ fn emit_triple(
         }
         let leading = line.len() - line.trim_start_matches(' ').len();
         let rest = &line[leading..];
-        let escaped_rest = rest.replace('\\', "\\\\");
+        // Backslashes are escapes in `"""`; quotes are escaped so a content
+        // line can never end with the `"""` closer (spec §4).
+        let escaped_rest = rest.replace('\\', "\\\\").replace('"', "\\\"");
         if leading == 0 {
             escaped_rest
         } else {

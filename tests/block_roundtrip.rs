@@ -26,6 +26,15 @@ fn triple_in_nested_list_item() {
 }
 
 #[test]
+fn content_ending_with_delimiter_round_trips() {
+    // A content line ending in `"""` would otherwise be read back as the
+    // inline closer; the serializer must escape it (found by the fuzzer).
+    roundtrip("a: '''\n  say \"\"\"\n'''\n");
+    roundtrip("a: '''\n  \"\"\"\n  x\n'''\n");
+    roundtrip("a: '''\n  \"\"\"\n'''\n");
+}
+
+#[test]
 fn empty_triple_spelling() {
     // A zero-content triple-quoted string is the empty string.
     let doc = from_str("k: \"\"\"\n\"\"\"\n").unwrap();
