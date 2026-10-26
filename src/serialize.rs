@@ -317,6 +317,15 @@ fn emit_triple(
         if line.is_empty() {
             return String::new();
         }
+        // The parser treats a whitespace-only line as blank and drops it.
+        // Escape every whitespace character so the line stays content.
+        if line.trim().is_empty() {
+            let mut s = String::with_capacity(line.len() * 6);
+            for c in line.chars() {
+                write!(s, "\\u{:04x}", c as u32).expect("writing to a String cannot fail");
+            }
+            return s;
+        }
         let leading = line.len() - line.trim_start_matches(' ').len();
         let rest = &line[leading..];
         // Backslashes are escapes in `"""`; quotes are escaped so a content
@@ -822,6 +831,23 @@ mod tests {
         let reparsed = crate::deserialize::from_str(&out).unwrap();
         assert_eq!(reparsed, d);
         assert!(out.contains("\\u0020"));
+    }
+
+    #[test]
+    fn triple_whitespace_only_lines_round_trip() {
+        // A line of non-space whitespace would be read back as a blank
+        // line and dropped; it must be fully escaped (found by the fuzzer).
+        for text in ["\u{b} \n", "\t\nx", "a\n\u{b} \nb", "\u{2028}\n"] {
+            let d = doc(&[("k", block(text))]);
+            let out = to_string(&d).unwrap();
+            let reparsed = crate::deserialize::from_str(&out).unwrap();
+            assert_eq!(reparsed, d, "round-trip failed for {text:?}");
+            assert_eq!(
+                to_string(&reparsed).unwrap(),
+                out,
+                "not idempotent for {text:?}"
+            );
+        }
     }
 
     #[test]
