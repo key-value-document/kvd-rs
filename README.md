@@ -17,7 +17,7 @@ Or add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-kvd-rs = { version = "1.2.0", features = ["serde"] }
+kvd-rs = { version = "1.2.1", features = ["serde"] }
 serde = { version = "1.0.0", features = ["derive"] }
 ```
 
